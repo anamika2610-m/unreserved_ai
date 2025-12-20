@@ -1,0 +1,770 @@
+[
+
+    {
+        "statusCode": 200,
+        "status": "Success",
+        "message": "Operation completed successfully",
+        "data": {
+          "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+          "slug": "property-slug-123",
+          "propertyId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+          "title": "Beautiful 3 Bedroom House",
+          "description": "A stunning property with modern amenities",
+          "propertyCategory": "residential",
+          "propertyType": "House",
+          "listingType": "private_sale",
+          "listingStatus": "active",
+          "auctionStatus": "to_be_started",
+          "auctionStartDate": "2024-01-01T00:00:00.000Z",
+          "auctionEndDate": "2024-01-15T00:00:00.000Z",
+          "publishedAt": "2024-01-01T00:00:00.000Z",
+          "allowPrivateInspection": true,
+          "price": 250000,
+          "displayPrice": true,
+          "auctionStartPrice": 450000,
+          "reverseAuctionNextDecreaseAt": "2024-01-20T00:00:00.000Z",
+          "reverseAuctionDecreaseAmount": 5000,
+          "propertyAttributes": {
+            "zoning": "R1",
+            "bedrooms": 3,
+            "bathrooms": 2,
+            "toilets": 1,
+            "garages": 2,
+            "ensuites": 1,
+            "isLandHousePackage": false,
+            "landArea": 500,
+            "landAreaUnit": "sqm",
+            "floorArea": 200,
+            "floorAreaUnit": "sqm",
+            "frontage": 20,
+            "frontageUnit": "m",
+            "propertyAge": "established",
+            "retailArea": 100,
+            "retailAreaUnit": "sqm",
+            "warehouseArea": 500,
+            "warehouseAreaUnit": "sqm",
+            "officeArea": 50,
+            "officeAreaUnit": "sqm",
+            "mezzanineArea": 30,
+            "mezzanineAreaUnit": "sqm",
+            "otherArea": 25,
+            "otherAreaUnit": "sqm",
+            "highlights": [
+              "Modern kitchen",
+              "Swimming pool"
+            ],
+            "carPorts": 2,
+            "openParkingSpaces": 3,
+            "yearBuilt": 2020,
+            "energyRating": 6
+          },
+          "propertyAmenities": [
+            {
+              "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+              "name": "Swimming Pool",
+              "icon": "pool-icon.svg"
+            }
+          ],
+          "openInspections": [
+            {
+              "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+              "inspectionStartTime": "2024-01-15T10:00:00.000Z",
+              "inspectionEndTime": "2024-01-15T11:00:00.000Z"
+            }
+          ],
+          "activeOfferCount": 5,
+          "activeBidCount": 10,
+          "highestBid": {
+            "bidAmount": 500000
+          },
+          "winningBid": {
+            "bidAmount": 500000
+          },
+          "saleHistory": {
+            "salePrice": 550000,
+            "buyer": {
+              "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+              "fullName": "Bob Johnson",
+              "isVerified": true,
+              "avatar": "https://example.com/avatar.jpg"
+            }
+          },
+          "propertyOwners": [
+            {
+              "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+              "fullName": "Bob Johnson",
+              "isVerified": true,
+              "avatar": "https://example.com/avatar.jpg"
+            }
+          ],
+          "propertyAgents": [
+            {
+              "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+              "fullName": "Bob Johnson",
+              "isVerified": true,
+              "avatar": "https://example.com/avatar.jpg"
+            }
+          ],
+          "propertyMedia": [
+            {
+              "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+              "displayOrder": 1,
+              "mediaMetadata": {
+                "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                "fileName": "file.jpg",
+                "fileUrl": "https:/www.google.com/1738583360199-8714-4a5a2cec-baa3-4f9c-8b08-90976a5fcc50.jpg",
+                "fileType": "jpeg",
+                "altText": "alt text of image"
+              }
+            }
+          ],
+          "propertyDocuments": [
+            {
+              "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+              "displayOrder": {},
+              "mediaMetadata": {
+                "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                "fileName": "file.jpg",
+                "fileUrl": "https:/www.google.com/1738583360199-8714-4a5a2cec-baa3-4f9c-8b08-90976a5fcc50.jpg",
+                "fileType": "jpeg",
+                "altText": "alt text of image"
+              }
+            }
+          ],
+          "location": {
+            "displayAddress": "123 Main St, Sydney NSW 2000",
+            "streetAddress": "123 Main Street",
+            "suburb": "Sydney",
+            "city": "Sydney",
+            "state": "NSW",
+            "country": "Australia",
+            "postalCode": 2000,
+            "latitude": -33.8688,
+            "longitude": 151.2093
+          },
+          "isSeller": true
+        },
+        "error": "string",
+        "meta": {},
+        "traceId": "string"
+    },
+    {
+      "statusCode": 200,
+      "status": "Success",
+      "message": "Operation completed successfully",
+      "data": {
+        "id": "11111111-aaaa-bbbb-cccc-000000000001",
+        "slug": "luxury-apartment-456",
+        "propertyId": "aaaa1111-bbbb-2222-cccc-000000000001",
+        "title": "Luxury 2 Bedroom Apartment",
+        "description": "A premium apartment with harbour views",
+        "propertyCategory": "residential",
+        "propertyType": "Apartment",
+        "listingType": "private_sale",
+        "listingStatus": "active",
+        "auctionStatus": "none",
+        "auctionStartDate": null,
+        "auctionEndDate": null,
+        "publishedAt": "2024-02-10T00:00:00.000Z",
+        "allowPrivateInspection": true,
+        "price": 850000,
+        "displayPrice": true,
+        "auctionStartPrice": null,
+        "reverseAuctionNextDecreaseAt": null,
+        "reverseAuctionDecreaseAmount": null,
+        "propertyAttributes": {
+          "zoning": "R2",
+          "bedrooms": 2,
+          "bathrooms": 2,
+          "toilets": 2,
+          "garages": 1,
+          "ensuites": 1,
+          "isLandHousePackage": false,
+          "landArea": 0,
+          "landAreaUnit": "sqm",
+          "floorArea": 120,
+          "floorAreaUnit": "sqm",
+          "frontage": 0,
+          "frontageUnit": "m",
+          "propertyAge": "new",
+          "retailArea": 0,
+          "retailAreaUnit": "sqm",
+          "warehouseArea": 0,
+          "warehouseAreaUnit": "sqm",
+          "officeArea": 0,
+          "officeAreaUnit": "sqm",
+          "mezzanineArea": 0,
+          "mezzanineAreaUnit": "sqm",
+          "otherArea": 0,
+          "otherAreaUnit": "sqm",
+          "highlights": [
+            "Harbour view balcony",
+            "Gym and sauna access"
+          ],
+          "carPorts": 0,
+          "openParkingSpaces": 0,
+          "yearBuilt": 2023,
+          "energyRating": 7
+        },
+        "propertyAmenities": [
+          {
+            "id": "am-0001",
+            "name": "Gym",
+            "icon": "gym.svg"
+          },
+          {
+            "id": "am-0001",
+            "name": "theatre",
+            "icon": "gym.svg"
+          },
+          {
+            "id": "am-0001",
+            "name": "Swimming Pool",
+            "icon": "gym.svg"
+          },
+          {
+            "id": "am-0001",
+            "name": "Non-sense",
+            "icon": "gym.svg"
+          }
+        ],
+        "openInspections": [
+          {
+            "id": "insp-0001",
+            "inspectionStartTime": "2024-02-20T09:00:00.000Z",
+            "inspectionEndTime": "2024-02-20T10:00:00.000Z"
+          }
+        ],
+        "activeOfferCount": 4,
+        "activeBidCount": 0,
+        "highestBid": null,
+        "winningBid": null,
+        "saleHistory": null,
+        "propertyOwners": [],
+        "propertyAgents": [
+          {
+            "id": "agent-0001",
+            "fullName": "Alice Smith",
+            "isVerified": true,
+            "avatar": "https://example.com/avatar1.jpg"
+          }
+        ],
+        "propertyMedia": [
+          {
+            "id": "media-0001",
+            "displayOrder": 1,
+            "mediaMetadata": {
+              "id": "meta-0001",
+              "fileName": "apt.jpg",
+              "fileUrl": "https://example.com/media/apt1.jpg",
+              "fileType": "jpeg",
+              "altText": "apartment exterior"
+            }
+          }
+        ],
+        "propertyDocuments": [],
+        "location": {
+          "displayAddress": "45 Harbour Rd, Sydney NSW 2000",
+          "streetAddress": "45 Harbour Road",
+          "suburb": "Sydney",
+          "city": "Sydney",
+          "state": "NSW",
+          "country": "Australia",
+          "postalCode": 2000,
+          "latitude": -33.8690,
+          "longitude": 151.2100
+        },
+        "isSeller": false
+      },
+      "error": null,
+      "meta": {},
+      "traceId": "trace-0001"
+    },
+  
+    {
+      "statusCode": 200,
+      "status": "Success",
+      "message": "Operation completed successfully",
+      "data": {
+        "id": "11111111-aaaa-bbbb-cccc-000000000002",
+        "slug": "modern-villa-789",
+        "propertyId": "aaaa1111-bbbb-2222-cccc-000000000002",
+        "title": "Modern 4 Bedroom Villa",
+        "description": "Spacious villa with private garden",
+        "propertyCategory": "residential",
+        "propertyType": "Villa",
+        "listingType": "auction",
+        "listingStatus": "active",
+        "auctionStatus": "to_be_started",
+        "auctionStartDate": "2024-03-01T00:00:00.000Z",
+        "auctionEndDate": "2024-03-10T00:00:00.000Z",
+        "publishedAt": "2024-02-15T00:00:00.000Z",
+        "allowPrivateInspection": true,
+        "price": 780000,
+        "displayPrice": false,
+        "auctionStartPrice": 900000,
+        "reverseAuctionNextDecreaseAt": null,
+        "reverseAuctionDecreaseAmount": null,
+        "propertyAttributes": {
+          "zoning": "R1",
+          "bedrooms": 3,
+          "bathrooms": 3,
+          "toilets": 3,
+          "garages": 2,
+          "ensuites": 1,
+          "isLandHousePackage": false,
+          "landArea": 650,
+          "landAreaUnit": "sqm",
+          "floorArea": 320,
+          "floorAreaUnit": "sqm",
+          "frontage": 25,
+          "frontageUnit": "m",
+          "propertyAge": "established",
+          "retailArea": 0,
+          "retailAreaUnit": "sqm",
+          "warehouseArea": 0,
+          "warehouseAreaUnit": "sqm",
+          "officeArea": 0,
+          "officeAreaUnit": "sqm",
+          "mezzanineArea": 0,
+          "mezzanineAreaUnit": "sqm",
+          "otherArea": 0,
+          "otherAreaUnit": "sqm",
+          "highlights": [
+            "Private landscaped garden",
+            "Solar-powered home"
+          ],
+          "carPorts": 1,
+          "openParkingSpaces": 2,
+          "yearBuilt": 2018,
+          "energyRating": 6
+        },
+        "propertyAmenities": [
+          {
+            "id": "am-0002",
+            "name": "Garden",
+            "icon": "garden.svg"
+          }
+        ],
+        "openInspections": [],
+        "activeOfferCount": 2,
+        "activeBidCount": 3,
+        "highestBid": {
+          "bidAmount": 950000
+        },
+        "winningBid": null,
+        "saleHistory": null,
+        "propertyOwners": [],
+        "propertyAgents": [
+          {
+            "id": "agent-0002",
+            "fullName": "Mark Johnson",
+            "isVerified": true,
+            "avatar": "https://example.com/avatar2.jpg"
+          }
+        ],
+        "propertyMedia": [],
+        "propertyDocuments": [],
+        "location": {
+          "displayAddress": "12 Green Park, Melbourne VIC 3000",
+          "streetAddress": "12 Green Park",
+          "suburb": "Melbourne",
+          "city": "Melbourne",
+          "state": "VIC",
+          "country": "Australia",
+          "postalCode": 3000,
+          "latitude": -37.8136,
+          "longitude": 144.9631
+        },
+        "isSeller": false
+      },
+      "error": null,
+      "meta": {},
+      "traceId": "trace-0002"
+    },
+  
+    {
+      "statusCode": 200,
+      "status": "Success",
+      "message": "Operation completed successfully",
+      "data": {
+        "id": "11111111-aaaa-bbbb-cccc-000000000003",
+        "slug": "warehouse-space-001",
+        "propertyId": "aaaa1111-bbbb-2222-cccc-000000000003",
+        "title": "Large Industrial Warehouse",
+        "description": "Perfect for logistics and storage needs",
+        "propertyCategory": "commercial",
+        "propertyType": "Warehouse",
+        "listingType": "private_sale",
+        "listingStatus": "active",
+        "auctionStatus": "none",
+        "auctionStartDate": null,
+        "auctionEndDate": null,
+        "publishedAt": "2024-01-20T00:00:00.000Z",
+        "allowPrivateInspection": true,
+        "price": 1200000,
+        "displayPrice": true,
+        "auctionStartPrice": null,
+        "reverseAuctionNextDecreaseAt": null,
+        "reverseAuctionDecreaseAmount": null,
+        "propertyAttributes": {
+          "zoning": "IN1",
+          "bedrooms": 3,
+          "bathrooms": 2,
+          "toilets": 2,
+          "garages": 0,
+          "ensuites": 0,
+          "isLandHousePackage": false,
+          "landArea": 1500,
+          "landAreaUnit": "sqm",
+          "floorArea": 1100,
+          "floorAreaUnit": "sqm",
+          "frontage": 40,
+          "frontageUnit": "m",
+          "propertyAge": "established",
+          "retailArea": 0,
+          "retailAreaUnit": "sqm",
+          "warehouseArea": 1000,
+          "warehouseAreaUnit": "sqm",
+          "officeArea": 100,
+          "officeAreaUnit": "sqm",
+          "mezzanineArea": 50,
+          "mezzanineAreaUnit": "sqm",
+          "otherArea": 0,
+          "otherAreaUnit": "sqm",
+          "highlights": [
+            "High-clearance warehouse",
+            "Truck access"
+          ],
+          "carPorts": 0,
+          "openParkingSpaces": 5,
+          "yearBuilt": 2010,
+          "energyRating": 5
+        },
+        "propertyAmenities": [],
+        "openInspections": [],
+        "activeOfferCount": 1,
+        "activeBidCount": 0,
+        "highestBid": null,
+        "winningBid": null,
+        "saleHistory": null,
+        "propertyOwners": [],
+        "propertyAgents": [],
+        "propertyMedia": [],
+        "propertyDocuments": [],
+        "location": {
+          "displayAddress": "88 Industry Rd, Brisbane QLD 4000",
+          "streetAddress": "88 Industry Road",
+          "suburb": "Brisbane",
+          "city": "Brisbane",
+          "state": "QLD",
+          "country": "Australia",
+          "postalCode": 4000,
+          "latitude": -27.4698,
+          "longitude": 153.0251
+        },
+        "isSeller": false
+      },
+      "error": null,
+      "meta": {},
+      "traceId": "trace-0003"
+    },
+  
+
+    {
+      "statusCode": 200,
+      "status": "Success",
+      "message": "Operation completed successfully",
+      "data": {
+        "id": "prop-similar-001",
+        "slug": "modern-3-bedroom-house-sydney",
+        "propertyId": "prop-similar-001",
+        "title": "Modern 3 Bedroom Family House",
+        "description": "A contemporary 3 bedroom residential house with modern interiors and a private swimming pool.",
+        "propertyCategory": "residential",
+        "propertyType": "House",
+        "listingType": "private_sale",
+        "listingStatus": "active",
+        "auctionStatus": "to_be_started",
+        "auctionStartDate": "2024-02-01T00:00:00.000Z",
+        "auctionEndDate": "2024-02-15T00:00:00.000Z",
+        "publishedAt": "2024-02-01T00:00:00.000Z",
+        "allowPrivateInspection": true,
+        "price": 510000,
+        "displayPrice": true,
+        "auctionStartPrice": 470000,
+        "reverseAuctionNextDecreaseAt": "2024-02-20T00:00:00.000Z",
+        "reverseAuctionDecreaseAmount": 5000,
+        "propertyAttributes": {
+          "zoning": "R1",
+          "bedrooms": 3,
+          "bathrooms": 2,
+          "toilets": 2,
+          "garages": 2,
+          "ensuites": 1,
+          "isLandHousePackage": false,
+          "landArea": 490,
+          "landAreaUnit": "sqm",
+          "floorArea": 195,
+          "floorAreaUnit": "sqm",
+          "frontage": 18,
+          "frontageUnit": "m",
+          "propertyAge": "established",
+          "retailArea": null,
+          "warehouseArea": null,
+          "officeArea": null,
+          "mezzanineArea": null,
+          "otherArea": null,
+          "highlights": [
+            "Swimming pool",
+            "Modern kitchen",
+            "Open-plan living"
+          ],
+          "carPorts": 1,
+          "openParkingSpaces": 2,
+          "yearBuilt": 2019,
+          "energyRating": 6
+        },
+        "propertyAmenities": [
+          {
+            "id": "amenity-001",
+            "name": "Swimming Pool",
+            "icon": "pool-icon.svg"
+          },
+          {
+            "id": "amenity-002",
+            "name": "Badmintion Court",
+            "icon": "pool-icon.svg"
+          }
+        ],
+        "openInspections": [
+          {
+            "id": "inspection-001",
+            "inspectionStartTime": "2024-02-10T10:00:00.000Z",
+            "inspectionEndTime": "2024-02-10T11:00:00.000Z"
+          }
+        ],
+        "activeOfferCount": 4,
+        "activeBidCount": 8,
+        "highestBid": { "bidAmount": 505000 },
+        "winningBid": null,
+        "saleHistory": null,
+        "propertyOwners": [
+          {
+            "id": "owner-001",
+            "fullName": "Alice Brown",
+            "isVerified": true,
+            "avatar": "https://example.com/avatar1.jpg"
+          }
+        ],
+        "propertyAgents": [
+          {
+            "id": "agent-001",
+            "fullName": "James Smith",
+            "isVerified": true,
+            "avatar": "https://example.com/avatar2.jpg"
+          }
+        ],
+        "propertyMedia": [
+          {
+            "id": "media-001",
+            "displayOrder": 1,
+            "mediaMetadata": {
+              "id": "media-meta-001",
+              "fileName": "front-view.jpg",
+              "fileUrl": "https://example.com/front-view.jpg",
+              "fileType": "jpeg",
+              "altText": "Front view of the house"
+            }
+          }
+        ],
+        "propertyDocuments": [],
+        "location": {
+          "displayAddress": "45 Park Lane, Sydney NSW 2000",
+          "streetAddress": "45 Park Lane",
+          "suburb": "Sydney",
+          "city": "Sydney",
+          "state": "NSW",
+          "country": "Australia",
+          "postalCode": 2000,
+          "latitude": -33.8685,
+          "longitude": 151.2090
+        },
+        "isSeller": false
+      },
+      "error": null,
+      "meta": {},
+      "traceId": "trace-similar-001"
+    },
+
+    {
+      "statusCode": 200,
+      "status": "Success",
+      "message": "Operation completed successfully",
+      "data": {
+        "id": "prop-moderate-001",
+        "slug": "3-bedroom-house-no-pool",
+        "propertyId": "prop-moderate-001",
+        "title": "3 Bedroom Suburban House",
+        "description": "A well-maintained family house with three bedrooms and a large backyard.",
+        "propertyCategory": "residential",
+        "propertyType": "House",
+        "listingType": "private_sale",
+        "listingStatus": "active",
+        "auctionStatus": "not_applicable",
+        "auctionStartDate": null,
+        "auctionEndDate": null,
+        "publishedAt": "2024-03-01T00:00:00.000Z",
+        "allowPrivateInspection": true,
+        "price": 455000,
+        "displayPrice": true,
+        "auctionStartPrice": null,
+        "reverseAuctionNextDecreaseAt": null,
+        "reverseAuctionDecreaseAmount": null,
+        "propertyAttributes": {
+          "zoning": "R2",
+          "bedrooms": 3,
+          "bathrooms": 1,
+          "toilets": 1,
+          "garages": 1,
+          "ensuites": 0,
+          "isLandHousePackage": false,
+          "landArea": 620,
+          "landAreaUnit": "sqm",
+          "floorArea": 160,
+          "floorAreaUnit": "sqm",
+          "frontage": 22,
+          "frontageUnit": "m",
+          "propertyAge": "established",
+          "retailArea": null,
+          "warehouseArea": null,
+          "officeArea": null,
+          "mezzanineArea": null,
+          "otherArea": null,
+          "highlights": [
+            "Large backyard",
+            "Quiet neighbourhood"
+          ],
+          "carPorts": 0,
+          "openParkingSpaces": 2,
+          "yearBuilt": 2010,
+          "energyRating": 4
+        },
+        "propertyAmenities": [],
+        "openInspections": [],
+        "activeOfferCount": 1,
+        "activeBidCount": 0,
+        "highestBid": null,
+        "winningBid": null,
+        "saleHistory": null,
+        "propertyOwners": [],
+        "propertyAgents": [],
+        "propertyMedia": [],
+        "propertyDocuments": [],
+        "location": {
+          "displayAddress": "12 Hill Road, Newcastle NSW 2300",
+          "streetAddress": "12 Hill Road",
+          "suburb": "Newcastle",
+          "city": "Newcastle",
+          "state": "NSW",
+          "country": "Australia",
+          "postalCode": 2300,
+          "latitude": -32.9283,
+          "longitude": 151.7817
+        },
+        "isSeller": false
+      },
+      "error": null,
+      "meta": {},
+      "traceId": "trace-moderate-001"
+    },
+
+    {
+      "statusCode": 200,
+      "status": "Success",
+      "message": "Operation completed successfully",
+      "data": {
+        "id": "prop-different-001",
+        "slug": "industrial-warehouse-melbourne",
+        "propertyId": "prop-different-001",
+        "title": "Industrial Warehouse Facility",
+        "description": "A large-scale commercial warehouse suitable for logistics and storage operations.",
+        "propertyCategory": "commercial",
+        "propertyType": "Warehouse",
+        "listingType": "lease",
+        "listingStatus": "active",
+        "auctionStatus": "not_applicable",
+        "auctionStartDate": null,
+        "auctionEndDate": null,
+        "publishedAt": "2024-01-15T00:00:00.000Z",
+        "allowPrivateInspection": false,
+        "price": 1200000,
+        "displayPrice": true,
+        "auctionStartPrice": null,
+        "reverseAuctionNextDecreaseAt": null,
+        "reverseAuctionDecreaseAmount": null,
+        "propertyAttributes": {
+          "zoning": "IN1",
+          "bedrooms": 0,
+          "bathrooms": 2,
+          "toilets": 2,
+          "garages": 10,
+          "ensuites": 0,
+          "isLandHousePackage": false,
+          "landArea": 3000,
+          "landAreaUnit": "sqm",
+          "floorArea": 2500,
+          "floorAreaUnit": "sqm",
+          "frontage": 60,
+          "frontageUnit": "m",
+          "propertyAge": "new",
+          "retailArea": null,
+          "warehouseArea": 2500,
+          "warehouseAreaUnit": "sqm",
+          "officeArea": 200,
+          "officeAreaUnit": "sqm",
+          "mezzanineArea": 150,
+          "mezzanineAreaUnit": "sqm",
+          "otherArea": null,
+          "highlights": [
+            "High clearance",
+            "Loading docks",
+            "Truck access"
+          ],
+          "carPorts": 0,
+          "openParkingSpaces": 20,
+          "yearBuilt": 2023,
+          "energyRating": null
+        },
+        "propertyAmenities": [],
+        "openInspections": [],
+        "activeOfferCount": 0,
+        "activeBidCount": 0,
+        "highestBid": null,
+        "winningBid": null,
+        "saleHistory": null,
+        "propertyOwners": [],
+        "propertyAgents": [],
+        "propertyMedia": [],
+        "propertyDocuments": [],
+        "location": {
+          "displayAddress": "88 Industrial Way, Melbourne VIC 3000",
+          "streetAddress": "88 Industrial Way",
+          "suburb": "Port Melbourne",
+          "city": "Melbourne",
+          "state": "VIC",
+          "country": "Australia",
+          "postalCode": 3000,
+          "latitude": -37.8136,
+          "longitude": 144.9631
+        },
+        "isSeller": false
+      },
+      "error": null,
+      "meta": {},
+      "traceId": "trace-different-001"
+    }    
+    
+ 
+  ]
+  
