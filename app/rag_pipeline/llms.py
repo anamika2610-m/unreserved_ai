@@ -82,9 +82,9 @@ elif provider == "openai" and OPENAI_AVAILABLE:
         current_provider = "openai"
         model_name = llm_settings.openai_model
 
-# Error if no client could be initialized
+# Warning if no client could be initialized (don't crash at startup)
 if llm_client is None:
-    error_msg = "No LLM client could be initialized. "
+    error_msg = "⚠️  WARNING: No LLM client could be initialized. "
     if provider == "groq":
         error_msg += "Please set GROQ_API_KEY in your .env file or environment variables."
         if not GROQ_AVAILABLE:
@@ -93,7 +93,8 @@ if llm_client is None:
         error_msg += "Please set OPENAI_API_KEY in your .env file or environment variables."
         if not OPENAI_AVAILABLE:
             error_msg += " (openai package not installed - run: pip install openai)"
-    raise ValueError(error_msg)
+    print(error_msg)
+    print("The API will start but chat endpoints will fail until LLM credentials are configured.")
 
 
 def get_llm_client():
@@ -102,7 +103,15 @@ def get_llm_client():
     
     Returns:
         Groq or OpenAI client
+        
+    Raises:
+        ValueError: If no LLM client is initialized
     """
+    if llm_client is None:
+        raise ValueError(
+            "No LLM client available. Please set GROQ_API_KEY or OPENAI_API_KEY "
+            "in your environment variables."
+        )
     return llm_client
 
 
@@ -113,6 +122,8 @@ def get_model_name() -> str:
     Returns:
         Model name string
     """
+    if model_name is None:
+        return "no-model-configured"
     return model_name
 
 
