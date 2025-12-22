@@ -75,9 +75,9 @@ class AIResponse(BaseModel):
     needs_vendor_contact: bool = Field(False, description="Whether the enquiry requires contacting the vendor/agent")
     escalation_reason: Optional[str] = Field(None, description="Reason for vendor contact if needs_vendor_contact is True")
     data_sources: List[DataSource] = Field(default_factory=list, description="List of data sources used in the response")
-    disclaimer: str = Field(
-        default="Based on available listing details, this is general information only and does not constitute financial or legal advice. For specific questions or confirmation, please contact the listing agent or vendor.",
-        description="Standard disclaimer included in all responses"
+    disclaimer: Optional[str] = Field(
+        None,
+        description="Disclaimer included only when vendor contact is needed or information is uncertain"
     )
 
 

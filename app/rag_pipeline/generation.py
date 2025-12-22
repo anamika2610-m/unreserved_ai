@@ -158,14 +158,15 @@ class ResponseGenerator:
         # Detect enquiry type for specialized prompts
         enquiry_type = detect_enquiry_type(query)
         
-        # Standard disclaimer
-        disclaimer = "Based on available listing details, this is general information only and does not constitute financial or legal advice. For specific questions or confirmation, please contact the listing agent or vendor."
-        
-        # Create appropriate prompt
+        # Create appropriate prompt (include amenity links info if available)
+        has_amenity_links = len(amenity_links) > 0
         if enquiry_type == 'bidding' or 'bid' in query.lower() or 'offer' in query.lower():
             user_prompt = create_bid_advice_prompt(query, context)
         else:
-            user_prompt = create_user_prompt(query, context)
+            user_prompt = create_user_prompt(query, context, has_amenity_links=has_amenity_links)
+        
+        # Disclaimer - only used when vendor contact is needed
+        disclaimer = None
         
         # Generate response with LLM
         try:
@@ -181,13 +182,6 @@ class ResponseGenerator:
             
             answer = response.choices[0].message.content.strip()
             
-            # Ensure response follows the required format
-            answer = self._format_response(answer, query)
-            
-            # Ensure disclaimer is included
-            if disclaimer.lower() not in answer.lower():
-                answer += f"\n\n---\n\n{disclaimer}"
-            
             # Check for escalation triggers in the response
             escalation_keywords = [
                 "not available", "not specified", "not found", "not provided",
@@ -202,6 +196,7 @@ class ResponseGenerator:
                     if escalation_count >= 2:  # Multiple mentions suggest insufficient data
                         needs_vendor_contact = True
                         escalation_reason = "Response indicates multiple information gaps requiring vendor contact."
+                        disclaimer = "Based on available listing details, this is general information only and does not constitute financial or legal advice. For specific questions or confirmation, please contact the listing agent or vendor."
                         # Replace answer with vendor contact message
                         answer = self._generate_vendor_contact_message(query, escalation_reason)
         
@@ -274,102 +269,34 @@ class ResponseGenerator:
             session_id=enquiry_data.get("session_id")
         )
     
-    def _format_response(self, answer: str, query: str) -> str:
-        """
-        Ensure response follows the required markdown format.
-        
-        Args:
-            answer: Raw LLM response
-            query: Original query for context
-            
-        Returns:
-            Formatted response with proper markdown structure
-        """
-        # Check if response already has the required format
-        has_main_answer = "## [Main Answer]" in answer or "## Main Answer" in answer
-        has_supporting = "## [Supporting Details]" in answer or "## Supporting Details" in answer
-        
-        if has_main_answer and has_supporting:
-            # Response already formatted, just ensure proper markdown
-            return answer
-        
-        # If not formatted, try to structure it
-        # Split answer into sentences
-        sentences = [s.strip() for s in answer.split('.') if s.strip()]
-        
-        if len(sentences) == 0:
-            return answer
-        
-        # Build formatted response
-        formatted = "## [Main Answer]\n\n"
-        
-        # Main answer: first 1-3 sentences
-        main_sentences = sentences[:min(3, len(sentences))]
-        formatted += '. '.join(main_sentences)
-        if not main_sentences[-1].endswith('.'):
-            formatted += '.'
-        formatted += "\n\n"
-        
-        # Supporting details: next 2-4 sentences
-        if len(sentences) > 3:
-            formatted += "## [Supporting Details]\n\n"
-            supporting_sentences = sentences[3:min(7, len(sentences))]
-            formatted += '. '.join(supporting_sentences)
-            if not supporting_sentences[-1].endswith('.'):
-                formatted += '.'
-            formatted += "\n\n"
-        
-        # Add follow-up suggestion if there's more content
-        if len(sentences) > 7:
-            formatted += "## [Follow-up Suggestion]\n\n"
-            formatted += "Would you like to know more about this property or have additional questions?\n\n"
-        
-        # Add any remaining content
-        remaining = '. '.join(sentences[7:]) if len(sentences) > 7 else ""
-        if remaining:
-            formatted += remaining
-            if not remaining.endswith('.'):
-                formatted += '.'
-            formatted += "\n\n"
-        
-        return formatted
-    
     def _generate_vendor_contact_message(self, query: str, reason: Optional[str] = None) -> str:
         """
-        Generate a generic message directing user to contact the vendor.
-        Follows the required markdown format.
+        Generate a natural message directing user to contact the vendor.
         
         Args:
             query: The original query
             reason: Optional reason for vendor contact
             
         Returns:
-            Formatted message directing to vendor contact in required format
+            Natural message directing to vendor contact
         """
-        formatted = "## [Main Answer]\n\n"
-        formatted += (
+        message = (
             "I apologize, but I don't have sufficient information in the available listing data "
             "to provide a complete answer to your question."
         )
         
-        if reason:
-            formatted += f" ({reason})"
-        formatted += "\n\n"
+        if reason and "No relevant property listing information found" not in reason:
+            message += f" ({reason})"
         
-        formatted += "## [Supporting Details]\n\n"
-        formatted += (
-            "For detailed information about this property, please contact the vendor or listing agent directly. "
+        message += (
+            "\n\nFor detailed information about this property, please contact the vendor or listing agent directly. "
             "They will be able to provide you with the specific details you're looking for."
         )
-        formatted += "\n\n"
         
-        formatted += "## [Follow-up Suggestion]\n\n"
-        formatted += "Would you like to contact the vendor or listing agent to get more information about this property?\n\n"
+        disclaimer = "\n\nBased on available listing details, this is general information only and does not constitute financial or legal advice. For specific questions or confirmation, please contact the listing agent or vendor."
+        message += disclaimer
         
-        disclaimer = "Based on available listing details, this is general information only and does not constitute financial or legal advice. For specific questions or confirmation, please contact the listing agent or vendor."
-        formatted += f"---\n\n{disclaimer}"
-        
-        return formatted
+        return message
 
 
 # Prevent running this module directly

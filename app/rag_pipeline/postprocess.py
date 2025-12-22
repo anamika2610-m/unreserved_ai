@@ -78,11 +78,12 @@ def validate_response(ai_response: AIResponse) -> Tuple[bool, str]:
     if not is_safe:
         return False, f"Response contains harmful content: {', '.join(detected_issues)}"
     
-    # Check that disclaimer is included
-    disclaimer_lower = ai_response.disclaimer.lower()
-    answer_lower = ai_response.answer.lower()
-    if disclaimer_lower not in answer_lower:
-        return False, "Disclaimer not found in response"
+    # Check that disclaimer is included (only if disclaimer is set)
+    if ai_response.disclaimer:
+        disclaimer_lower = ai_response.disclaimer.lower()
+        answer_lower = ai_response.answer.lower()
+        if disclaimer_lower not in answer_lower:
+            return False, "Disclaimer not found in response"
     
     # Check that data sources are logged
     if not ai_response.data_sources:
@@ -166,15 +167,12 @@ def filter_harmful_content(content: str) -> str:
     if is_safe:
         return content
     
-    # Generate safe replacement message
+    # Generate safe replacement message (natural, conversational format)
     safe_message = (
-        "## [Main Answer]\n\n"
         "I apologize, but I cannot provide a response to this query as it may contain "
         "inappropriate or harmful content.\n\n"
-        "## [Supporting Details]\n\n"
         "For property-related questions, please contact the vendor or listing agent directly. "
         "They will be able to assist you with legitimate property enquiries.\n\n"
-        "---\n\n"
         "Based on available listing details, this is general information only and does not "
         "constitute financial or legal advice. For specific questions or confirmation, please "
         "contact the listing agent or vendor."
@@ -199,12 +197,13 @@ def sanitize_response(ai_response: AIResponse) -> AIResponse:
     # If content was filtered, update the response
     if safe_answer != ai_response.answer:
         # Create new response with filtered content
+        disclaimer = "Based on available listing details, this is general information only and does not constitute financial or legal advice. For specific questions or confirmation, please contact the listing agent or vendor."
         return AIResponse(
             answer=safe_answer,
             needs_vendor_contact=True,  # Flag for vendor contact when content is filtered
             escalation_reason="Response contained inappropriate content and was filtered for safety.",
             data_sources=ai_response.data_sources,
-            disclaimer=ai_response.disclaimer
+            disclaimer=disclaimer  # Include disclaimer when content is filtered
         )
     
     return ai_response
