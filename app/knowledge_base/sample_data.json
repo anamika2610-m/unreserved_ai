@@ -111,7 +111,7 @@
           "mediaMetadata": {
             "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
             "fileName": "file.jpg",
-            "fileUrl": "https://www.google.com/1738583360199-8714-4a5a2cec-baa3-4f9c-8b08-90976a5fcc50.jpg",
+            "fileUrl": "https://propertyphotos.vaultre.com.au/7346/179007753__1765275563-121268-6ffda9213a12424e6a3035a6115841240fb86e13.png",
             "fileType": "jpeg",
             "altText": "alt text of image"
           }
@@ -255,7 +255,7 @@
           "mediaMetadata": {
             "id": "meta-0001",
             "fileName": "apt.jpg",
-            "fileUrl": "https://example.com/media/apt1.jpg",
+            "fileUrl": "https://propertyphotos.vaultre.com.au/7346/175743761__1763540524-110716-img2.jpeg",
             "fileType": "jpeg",
             "altText": "apartment exterior"
           }
@@ -361,7 +361,19 @@
           "avatar": "https://example.com/avatar2.jpg"
         }
       ],
-      "propertyMedia": [],
+      "propertyMedia": [
+        {
+          "id": "media-0001",
+          "displayOrder": 1,
+          "mediaMetadata": {
+            "id": "meta-0001",
+            "fileName": "apt.jpg",
+            "fileUrl": "https://propertyphotos.vaultre.com.au/7346/175743761__1763540524-110716-img2.jpeg",
+            "fileType": "jpeg",
+            "altText": "apartment exterior"
+          }
+        }
+      ],
       "propertyDocuments": [],
       "location": {
         "displayAddress": "12 Green Park, Melbourne VIC 3000",
@@ -447,7 +459,19 @@
       "saleHistory": null,
       "propertyOwners": [],
       "propertyAgents": [],
-      "propertyMedia": [],
+      "propertyMedia": [
+        {
+          "id": "media-0001",
+          "displayOrder": 1,
+          "mediaMetadata": {
+            "id": "meta-0001",
+            "fileName": "apt.jpg",
+            "fileUrl": "https://propertyphotos.vaultre.com.au/7346/175743762__1763540526-111264-img3.jpeg",
+            "fileType": "jpeg",
+            "altText": "apartment exterior"
+          }
+        }
+      ],
       "propertyDocuments": [],
       "location": {
         "displayAddress": "88 Industry Rd, Brisbane QLD 4000",
@@ -567,7 +591,7 @@
           "mediaMetadata": {
             "id": "media-meta-001",
             "fileName": "front-view.jpg",
-            "fileUrl": "https://example.com/front-view.jpg",
+            "fileUrl": "https://propertyphotos.vaultre.com.au/7346/175743764__1763540528-111246-img4.jpeg",
             "fileType": "jpeg",
             "altText": "Front view of the house"
           }
@@ -653,7 +677,19 @@
       "saleHistory": null,
       "propertyOwners": [],
       "propertyAgents": [],
-      "propertyMedia": [],
+      "propertyMedia": [
+        {
+          "id": "media-001",
+          "displayOrder": 1,
+          "mediaMetadata": {
+            "id": "media-meta-001",
+            "fileName": "front-view.jpg",
+            "fileUrl": "https://propertyphotos.vaultre.com.au/7346/175743765__1763540530-111063-img5.jpeg",
+            "fileType": "jpeg",
+            "altText": "Front view of the house"
+          }
+        }
+      ],
       "propertyDocuments": [],
       "location": {
         "displayAddress": "12 Hill Road, Newcastle NSW 2300",
@@ -738,7 +774,19 @@
       "saleHistory": null,
       "propertyOwners": [],
       "propertyAgents": [],
-      "propertyMedia": [],
+      "propertyMedia": [
+        {
+          "id": "media-001",
+          "displayOrder": 1,
+          "mediaMetadata": {
+            "id": "media-meta-001",
+            "fileName": "front-view.jpg",
+            "fileUrl": "https://propertyphotos.vaultre.com.au/7346/179007753__1765275563-121268-6ffda9213a12424e6a3035a6115841240fb86e13.png",
+            "fileType": "png",
+            "altText": "Front view of the house"
+          }
+        }
+      ],
       "propertyDocuments": [],
       "location": {
         "displayAddress": "88 Industrial Way, Melbourne VIC 3000",
@@ -842,7 +890,7 @@
           "mediaMetadata": {
             "id": "media-meta-land-001",
             "fileName": "land.jpg",
-            "fileUrl": "https://example.com/land.jpg",
+            "fileUrl": "https://propertyphotos.vaultre.com.au/7346/175743761__1763540524-110716-img2.jpeg",
             "fileType": "jpeg",
             "altText": "Mad land property"
           }
@@ -951,7 +999,7 @@
           "mediaMetadata": {
             "id": "media-meta-rural-001",
             "fileName": "rural.jpg",
-            "fileUrl": "https://example.com/rural.jpg",
+            "fileUrl": "https://propertyphotos.vaultre.com.au/7346/174924942__1763098832-95451-img1.jpeg",
             "fileType": "jpeg",
             "altText": "Mad rural property"
           }
@@ -1060,7 +1108,7 @@
           "mediaMetadata": {
             "id": "media-meta-mansion-001",
             "fileName": "mansion1.jpg",
-            "fileUrl": "https://example.com/mansion1.jpg",
+            "fileUrl": "https://propertyphotos.vaultre.com.au/7346/175743762__1763540526-111264-img3.jpeg",
             "fileType": "jpeg",
             "altText": "Mad mansion view 1"
           }

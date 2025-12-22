@@ -27,59 +27,54 @@ CRITICAL RULES:
 LOCATION-BASED QUERIES (NEW):
 9. **Nearby Properties**: When the listing data includes "NEARBY PROPERTIES" information, use it to inform buyers about other properties for sale in the area. Include distances and brief details.
 10. **Nearby Amenities/Transport**: When asked about nearby hospitals, schools, bus stops, etc.:
+    - If the prompt mentions that Google Maps links will be provided below, say: "You can check nearby [amenity type] using the links provided below."
+    - If links are NOT mentioned in the prompt, you can suggest using mapping services with the coordinates
     - Use the provided latitude/longitude coordinates to acknowledge the property's location
-    - Inform the buyer that specific amenity information can be found using the coordinates with:
-      * Google Maps or similar mapping services
-      * Local council websites
-      * Public transport authority websites
     - If nearby properties are provided in the context, mention them
     - DO NOT invent or guess what amenities might be nearby
 11. **Location Context**: If "LOCATION CONTEXT" is provided with coordinates, use them to help buyers understand the property's location and how to find nearby facilities.
 
 IMPORTANT: When the listing data contains the answer (e.g., "Asking Price: $500,000" for a price question), you MUST use that information directly. Do not say the information is not available if it's clearly in the provided data.
 
-RESPONSE FORMAT (MANDATORY - You MUST follow this exact structure):
-
-Use markdown formatting with the following sections:
-
-## [Main Answer]
-
-Brief, direct answer to the query (1-3 sentences). This should directly address the buyer's question.
-
-## [Supporting Details]
-
-Additional relevant information (2-4 sentences). Provide context, specifications, or related details from the listing data.
-
-## [Follow-up Suggestion] (optional)
-
-If relevant, suggest what additional information might be helpful. For example: "Would you like to know more about [specific aspect]?"
-
----
-
-DISCLAIMER (include at the end of every response):
-"Based on available listing details, this is general information only and does not constitute financial or legal advice. For specific questions or confirmation, please contact the listing agent or vendor."
-
-IMPORTANT: Your response MUST use this exact markdown format with ## headers. Do not deviate from this structure.
+RESPONSE STYLE:
+- Write naturally and conversationally, like ChatGPT
+- Answer the question directly and concisely
+- Only provide additional details if the query explicitly asks for them
+- Use a friendly, helpful tone
+- Keep responses brief unless the user is asking for more information
+- Format with markdown for readability (bullets, bold) but NO section headers like "Main Answer" or "Supporting Details"
+- **IMPORTANT: Use bold markdown (**text**) to highlight key information:**
+  * Prices: **$510,000**
+  * Distances: **1.5 km** or **2.3 km away**
+  * Key numbers: **3 bedrooms**, **2 bathrooms**, **490 sqm**
+  * Dates: **2024-02-20**
+  * Important specifications: **Swimming pool**, **Modern kitchen**
+- DO NOT include disclaimers unless the information is uncertain or you're directing them to contact an agent
 """
 
 
-def create_user_prompt(query: str, context: str) -> str:
+def create_user_prompt(query: str, context: str, has_amenity_links: bool = False) -> str:
     """
     Create the user prompt with query and context.
     
     Args:
         query: The buyer's question
         context: Retrieved listing information (may include location context)
+        has_amenity_links: Whether Google Maps amenity links will be provided in the response
         
     Returns:
         Formatted user prompt
     """
+    amenity_note = ""
+    if has_amenity_links:
+        amenity_note = "\n\nIMPORTANT: Google Maps links for the requested amenities will be provided below your response. In your answer, you MUST mention that the user can check nearby amenities using the links provided below. Be specific about which amenity type each link refers to. For example: 'You can check nearby hospitals using the link provided below' or 'I've included a Google Maps link below to help you find nearby schools.' Always specify the exact amenity type (hospitals, schools, gyms, etc.) that the link is for."
+    
     return f"""Buyer Question: {query}
 
 PROPERTY LISTING DATA (READ THIS CAREFULLY - IT CONTAINS THE ANSWER):
-{context}
+{context}{amenity_note}
 
-STEP-BY-STEP INSTRUCTIONS:
+INSTRUCTIONS:
 1. **READ THE LISTING DATA ABOVE** - It contains property information including prices, specifications, locations, etc.
 2. **CHECK FOR LOCATION CONTEXT** - If the data includes "LOCATION CONTEXT" or "NEARBY PROPERTIES", use that information for location-based questions.
 3. **FIND THE RELEVANT INFORMATION** - Look for data that directly answers the buyer's question
@@ -89,16 +84,20 @@ STEP-BY-STEP INSTRUCTIONS:
    - If NEARBY PROPERTIES are listed, mention them with distances
    - If asking about amenities (hospitals, schools, etc.), provide the coordinates and guide them to mapping services
    - DO NOT invent nearby amenities
-7. **FORMAT YOUR RESPONSE** using the required markdown structure:
-   - ## [Main Answer] - Direct answer with specific information from the data (1-3 sentences)
-   - ## [Supporting Details] - Additional relevant details from the data (2-4 sentences)
-   - ## [Follow-up Suggestion] - Optional suggestion
+7. **ANSWER NATURALLY** - Write like a helpful human assistant, not a robot. Be conversational and concise.
+8. **USE BOLD FOR KEY DETAILS** - Highlight important information using **bold markdown**:
+   - Prices: "The asking price is **$510,000**"
+   - Distances: "There are 3 nearby properties, located **1.83 km**, **1.87 km**, and **1.9 km** away"
+   - Specifications: "This property has **3 bedrooms**, **2 bathrooms**, and **490 sqm** of land"
+   - Features: "The property includes a **swimming pool** and **modern kitchen**"
 
-EXAMPLE: If the question asks "What is the price?" and the data shows "Asking Price: $500,000", your [Main Answer] should say "The asking price is $500,000" (using the exact information from the data).
+EXAMPLE: If asked "What is the price?", respond: "The asking price is **$510,000**" (using bold for the price).
 
-LOCATION QUERY EXAMPLE: If asked "Are there nearby properties?" and the data shows nearby properties with distances, list them. If asked about hospitals and only coordinates are provided, guide the user to use mapping services with those coordinates.
-
-IMPORTANT: DO NOT say information is not available if it's clearly present in the listing data above. Extract and use the information directly."""
+# IMPORTANT: 
+# - DO NOT use section headers like "## [Main Answer]" or "## [Supporting Details]"
+# - DO NOT say information is not available if it's clearly present in the listing data above
+# - Keep responses brief and direct unless the user asks for more detail
+# - Always use **bold** for prices, distances, key numbers, and important features"""
 
 
 def create_bid_advice_prompt(query: str, context: str) -> str:

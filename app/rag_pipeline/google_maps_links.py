@@ -312,16 +312,19 @@ def generate_custom_search_link(
     # Create a nice label (title case)
     label = search_term.title()
     
-    # Try to find a matching icon from predefined types
+    # Try to find a matching icon and amenity type from predefined types
     icon = "📍"  # Default location icon
+    amenity_type = "custom"
     search_lower = search_term.lower()
-    for amenity_type, config in AMENITY_TYPES.items():
+    for atype, config in AMENITY_TYPES.items():
         if any(keyword in search_lower for keyword in config.get("keywords", [])):
             icon = config["icon"]
+            amenity_type = atype
             break
     
     return {
         "type": "custom",
+        "amenity_type": amenity_type,  # Add explicit amenity type identifier
         "search_term": search_term,
         "label": label,
         "icon": icon,
@@ -379,6 +382,7 @@ def generate_amenity_links(
         
         link_obj = {
             "type": amenity_type,
+            "amenity_type": amenity_type,  # Explicit amenity type identifier
             "icon": config["icon"],
             "label": config["label"],
             "url": generate_google_maps_link(amenity_type, latitude, longitude, zoom)
