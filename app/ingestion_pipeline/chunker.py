@@ -276,13 +276,15 @@ class PropertyListingChunker:
                 parts.append("Price: Contact agent for pricing")
         
         # Current bidding status
-        if listing.get('activeBidCount', 0) > 0:
-            parts.append(f"Active Bids: {listing.get('activeBidCount')}")
+        active_bid_count = listing.get('activeBidCount') or 0
+        if active_bid_count > 0:
+            parts.append(f"Active Bids: {active_bid_count}")
             if listing.get('highestBidAmount'):
                 parts.append(f"Highest Bid: ${listing.get('highestBidAmount'):,.0f}" if isinstance(listing.get('highestBidAmount'), (int, float)) else f"Highest Bid: {listing.get('highestBidAmount')}")
         
-        if listing.get('activeOfferCount', 0) > 0:
-            parts.append(f"Active Offers: {listing.get('activeOfferCount')}")
+        active_offer_count = listing.get('activeOfferCount') or 0
+        if active_offer_count > 0:
+            parts.append(f"Active Offers: {active_offer_count}")
         
         # Reverse auction info
         if listing.get('reverseAuctionNextDecreaseAt'):

@@ -55,11 +55,11 @@ def format_listing_for_chunking(listing: Dict[str, Any]) -> Dict[str, Any]:
     attrs = listing.get('propertyAttributes', {})
     
     # Extract amenities
-    amenities = listing.get('propertyAmenities', [])
+    amenities = listing.get('propertyAmenities') or []
     amenity_names = [a.get('name', '') for a in amenities if isinstance(a, dict)]
     
     # Extract inspection times
-    inspections = listing.get('openInspections', [])
+    inspections = listing.get('openInspections') or []
     inspection_times = []
     for insp in inspections:
         if isinstance(insp, dict):
@@ -69,7 +69,7 @@ def format_listing_for_chunking(listing: Dict[str, Any]) -> Dict[str, Any]:
                 inspection_times.append(f"{start} to {end}")
     
     # Extract agent information
-    agents = listing.get('propertyAgents', [])
+    agents = listing.get('propertyAgents') or []
     agent_names = [a.get('fullName', '') for a in agents if isinstance(a, dict)]
     
     # Format pricing information
