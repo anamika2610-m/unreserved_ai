@@ -1,6 +1,7 @@
 """
 Generation module for creating AI responses to buyer enquiries.
 """
+import re
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from app.rag_pipeline.llms import get_llm_client, get_model_config, get_model_name, create_chat_completion
@@ -97,15 +98,35 @@ class ResponseGenerator:
                 # If we can't get location, amenity links won't be generated
                 pass
         
-        # Generate amenity links if we have location and detected an amenity query
-        if latitude and longitude and has_amenity_query:
-            links_data = generate_context_aware_links(
-                query=query,
-                latitude=latitude,
-                longitude=longitude,
-                include_common=False  # Only show specifically requested amenities
+        # Helper: detect generic transport queries (e.g. "nearby transport") where
+        # the user has NOT specified a particular mode like bus, train, metro, etc.
+        def _is_generic_transport_query(text: str) -> bool:
+            q = text.lower()
+            generic_tokens = ["transport", "transports", "public transport"]
+            specific_tokens = [
+                "bus stop", "bus stops", "bus station", "bus stations",
+                "bus", "buses",
+                "train station", "train stations", "train", "trains",
+                "metro", "tram", "trams",
+                "airport", "airports", "taxi", "taxis"
+            ]
+            return any(tok in q for tok in generic_tokens) and not any(
+                tok in q for tok in specific_tokens
             )
-            amenity_links = links_data['all_links']
+
+        is_generic_transport = _is_generic_transport_query(query)
+
+        # Generate amenity links if we have location and detected an amenity query.
+        # For transport, only generate links when the user has specified a particular
+        # transport type (bus stops, train stations, etc.), not for generic "transport".
+        if latitude and longitude and has_amenity_query and not is_generic_transport:
+                links_data = generate_context_aware_links(
+                    query=query,
+                    latitude=latitude,
+                    longitude=longitude,
+                include_common=False  # Only show specifically requested amenities
+                )
+                amenity_links = links_data['all_links']
         
         # Check data sufficiency
         is_sufficient, insufficiency_reason = self.augmenter.check_data_sufficiency(
@@ -121,14 +142,13 @@ class ResponseGenerator:
         # If data is insufficient, generate generic vendor contact message
         if needs_vendor_contact:
             vendor_contact_message = self._generate_vendor_contact_message(query, insufficiency_reason)
-            disclaimer = "Based on available listing details, this is general information only and does not constitute financial or legal advice. For specific questions or confirmation, please contact the listing agent or vendor."
             
             ai_response = AIResponse(
                 answer=vendor_contact_message,
                 needs_vendor_contact=True,
                 escalation_reason=escalation_reason,
                 data_sources=data_sources,
-                disclaimer=disclaimer
+                disclaimer=None  # No disclaimer
             )
             
             # Sanitize response to filter harmful content
@@ -168,6 +188,9 @@ class ResponseGenerator:
         # Disclaimer - only used when vendor contact is needed
         disclaimer = None
         
+        # Track if rate limit error occurred - if so, clear amenity_links and nearby_properties
+        rate_limit_error = False
+        
         # Generate response with LLM
         try:
             response = create_chat_completion(
@@ -196,19 +219,64 @@ class ResponseGenerator:
                     if escalation_count >= 2:  # Multiple mentions suggest insufficient data
                         needs_vendor_contact = True
                         escalation_reason = "Response indicates multiple information gaps requiring vendor contact."
-                        disclaimer = "Based on available listing details, this is general information only and does not constitute financial or legal advice. For specific questions or confirmation, please contact the listing agent or vendor."
                         # Replace answer with vendor contact message
                         answer = self._generate_vendor_contact_message(query, escalation_reason)
         
         except Exception as e:
-            # Fallback response if LLM fails
-            disclaimer = "Based on available listing details, this is general information only and does not constitute financial or legal advice. For specific questions or confirmation, please contact the listing agent or vendor."
-            answer = self._generate_vendor_contact_message(
-                query, 
-                f"System error occurred: {str(e)}"
-            )
-            needs_vendor_contact = True
-            escalation_reason = f"LLM generation error: {str(e)}"
+            # Check if it's a rate limit error
+            error_str = str(e)
+            is_rate_limit = "429" in error_str or "rate_limit" in error_str.lower() or "Rate limit" in error_str
+            
+            if is_rate_limit:
+                rate_limit_error = True  # Mark that rate limit occurred
+                
+                # Extract exact retry time from error message
+                # Pattern: "Please try again in 15m29.664s" or "Please try again in 15m29s"
+                time_pattern = r"Please try again in ([\d\.]+m[\d\.]*s)"
+                match = re.search(time_pattern, error_str)
+                
+                if match:
+                    time_str = match.group(1)  # e.g., "15m29.664s"
+                    # Parse minutes and seconds
+                    minutes_match = re.search(r"([\d\.]+)m", time_str)
+                    seconds_match = re.search(r"([\d\.]+)s", time_str)
+                    
+                    minutes = int(float(minutes_match.group(1))) if minutes_match and minutes_match.group(1) else 0
+                    seconds = int(float(seconds_match.group(1))) if seconds_match and seconds_match.group(1) else 0
+                    
+                    # Format time nicely
+                    if minutes > 0 and seconds > 0:
+                        time_display = f"{minutes} minute{'s' if minutes != 1 else ''} and {seconds} second{'s' if seconds != 1 else ''}"
+                    elif minutes > 0:
+                        time_display = f"{minutes} minute{'s' if minutes != 1 else ''}"
+                    elif seconds > 0:
+                        time_display = f"{seconds} second{'s' if seconds != 1 else ''}"
+                    else:
+                        time_display = "a few minutes"
+                    
+                    answer = (
+                        f"I apologize, but the service is currently experiencing high demand. "
+                        f"Please try again in {time_display}."
+                    )
+                else:
+                    # Fallback if time extraction fails
+                    answer = (
+                        "I apologize, but the service is currently experiencing high demand. "
+                        "Please try again in a few minutes."
+                    )
+                
+                # Rate limit is not a vendor contact issue - it's a service issue
+                needs_vendor_contact = False
+                escalation_reason = "Rate limit exceeded"
+            else:
+                # Generic error message without technical details
+                answer = (
+                    "I apologize, but I'm unable to process your request at the moment. "
+                )
+                needs_vendor_contact = True
+                escalation_reason = f"LLM generation error: {type(e).__name__}"  # Log error type only, not full message
+            
+            disclaimer = None  # No disclaimer for errors
         
         # Create AI response object
         ai_response = AIResponse(
@@ -241,6 +309,12 @@ class ResponseGenerator:
         nearby_properties_json = []
         if location_context and location_context.get('nearby_properties_json'):
             nearby_properties_json = location_context['nearby_properties_json']
+        
+        # If rate limit error occurred, clear amenity_links and nearby_properties
+        # Only return the error message, no additional data
+        if rate_limit_error:
+            amenity_links = []
+            nearby_properties_json = []
         
         return {
             "ai_response": ai_response,
@@ -292,9 +366,6 @@ class ResponseGenerator:
             "\n\nFor detailed information about this property, please contact the vendor or listing agent directly. "
             "They will be able to provide you with the specific details you're looking for."
         )
-        
-        disclaimer = "\n\nBased on available listing details, this is general information only and does not constitute financial or legal advice. For specific questions or confirmation, please contact the listing agent or vendor."
-        message += disclaimer
         
         return message
 

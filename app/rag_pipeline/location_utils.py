@@ -322,27 +322,37 @@ def format_location_info_for_prompt(
     Returns:
         Formatted location context string
     """
+    # NOTE: We intentionally do NOT expose raw latitude/longitude values in the LLM context,
+    # so they don't appear in the user-facing answer. Coordinates are still used internally
+    # for distance calculations and to generate Google Maps links, but the model should talk
+    # about "this location" or "the property" instead of printing numeric lat/long.
     context_parts = [
         "\n=== LOCATION CONTEXT ===",
-        f"Property Location: {address}",
-        f"Coordinates: {latitude}, {longitude}\n"
+        f"Property Location: {address}\n",
     ]
     
     if nearby_properties:
         context_parts.append(format_nearby_properties_context(nearby_properties, ""))
     
     if query_type == 'nearby_amenities':
-        context_parts.append(
-            "\nNote: For nearby amenities (hospitals, schools, etc.), "
-            "use the coordinates to provide context. Inform the user that specific "
-            "amenity information can be found using the coordinates with mapping services."
+        context_text = (
+            "Note: The user is asking about nearby amenities such as hospitals, schools, "
+            "parks, gyms, or libraries. Do NOT mention numeric latitude/longitude values "
+            "in your answer. If Google Maps links for specific amenities are provided, tell "
+            "the user they can find nearby [amenity type] using the links below."
         )
+        context_parts.append("\n" + context_text)
     elif query_type == 'nearby_transport':
-        context_parts.append(
-            "\nNote: For nearby transport (bus stops, train stations), "
-            "inform the user that this information can be found using the coordinates "
-            "with public transport mapping services or local council websites."
+        context_text = (
+            "Note: The user is asking about nearby transport options (bus stops, train "
+            "stations, metro, tram, etc.). First ask a brief follow-up question to clarify "
+            "which type of transport they are interested in (e.g., bus stops or train "
+            "stations). Once they specify the transport type, use the provided Google Maps "
+            "links (or generate a link using that exact transport term) and tell the user "
+            "they can find nearby [transport type] using the links below. Do NOT include "
+            "numeric latitude/longitude values in your answer."
         )
+        context_parts.append("\n" + context_text)
     
     return "\n".join(context_parts)
 

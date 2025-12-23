@@ -24,8 +24,9 @@ AMENITY_TYPES = {
     "bus_stops": {
         "icon": "🚌",
         "label": "Bus Stops & Public Transport",
-        "search_terms": ["bus+stops", "public+transport"],
-        "keywords": ["bus", "bus stop", "public transport", "metro", "train station"]
+        # Only match explicit bus-related terms, not generic "transport"
+        "search_terms": ["bus+stops", "bus+station", "bus+stations"],
+        "keywords": ["bus", "bus stop", "bus stops", "bus station", "bus stations"]
     },
     "supermarkets": {
         "icon": "🛒",
@@ -150,8 +151,8 @@ def is_amenity_query(query: str) -> bool:
         # Fitness & Recreation
         'gym', 'gyms', 'fitness', 'park', 'parks', 'playground', 'playgrounds',
         'pool', 'pools', 'sports', 'yoga', 'studio', 'studios',
-        # Transportation
-        'station', 'stations', 'transport', 'bus', 'buses', 'train', 'trains',
+        # Transportation (only specific modes, not generic "transport")
+        'station', 'stations', 'bus', 'buses', 'train', 'trains',
         'metro', 'airport', 'airports', 'taxi', 'taxis',
         # Financial
         'bank', 'banks', 'atm', 'atms', 'credit union',

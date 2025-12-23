@@ -173,9 +173,39 @@ class QueryAugmenter:
                 return False, "Location information not found in listing data."
         
         # Auction/bidding queries
-        if any(kw in query_lower for kw in ['auction', 'bid', 'bidding']):
-            if 'auction' not in context_lower and 'bid' not in context_lower:
-                return False, "Auction/bidding information not found in listing data."
+        # Previously we treated missing explicit 'auction'/'bid' text in the context as insufficient
+        # data and escalated to vendor contact. This caused unhelpful responses like
+        # "Auction/bidding information not found in listing data" even when the listing
+        # clearly indicates that there is simply NO auction (e.g. auctionStatus is null/none/not_applicable).
+        #
+        # Now we allow the LLM to answer these queries directly using auctionStatus or
+        # sale method information from the listing data. Do NOT mark data as insufficient
+        # just because the word "auction" or "bid" is missing from the context.
+        # The prompt instructs the model:
+        # - If auctionStatus is null/none/not_applicable -> say there is no auction available.
+        # - Otherwise, describe the auction details when present.
+        # So we intentionally do NOT return False here.
+        # if any(kw in query_lower for kw in ['auction', 'bid', 'bidding']):
+        #     if 'auction' not in context_lower and 'bid' not in context_lower:
+        #         return False, "Auction/bidding information not found in listing data."
+        
+        # Property category / type queries:
+        # The user might ask in natural language:
+        # "Is this a residential property?", "Is this land or rural?", "What type of property is this?"
+        # As long as we have some listing data, treat these as answerable so we don't
+        # unnecessarily escalate to vendor contact.
+        property_category_type_keywords = [
+            'residential',
+            'rural',
+            'land',
+            'property type',
+            'type of property',
+            'what kind of property',
+            'kind of property',
+            'category of property'
+        ]
+        if any(kw in query_lower for kw in property_category_type_keywords):
+            return True, None
         
         # If we have some data sources, consider it sufficient
         # The LLM will handle cases where information is partial
