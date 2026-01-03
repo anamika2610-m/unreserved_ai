@@ -20,7 +20,7 @@ from app.rag_pipeline.generation import ResponseGenerator
 
 
 # Create router
-router = APIRouter(prefix="/api/chat", tags=["chat"])
+router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
 
 # Global generator instance (initialized once)
 _generator = None
@@ -31,8 +31,7 @@ def get_generator() -> ResponseGenerator:
     global _generator
     if _generator is None:
         _generator = ResponseGenerator(
-            collection_name="property_listings",
-            persist_directory="./chroma_db"
+            embedding_model="all-MiniLM-L6-v2"  # Now using pgvector
         )
     return _generator
 

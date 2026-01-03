@@ -2,24 +2,23 @@
 FastAPI application for Property Chat API.
 
 Run with:
-    uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
+    uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
     
 Or:
-    python -m uvicorn app.api.main:app --reload
+    python -m uvicorn app.main:app --reload
 """
 
 import os
 
-# Disable ChromaDB telemetry and tokenizer warnings
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 os.environ.setdefault("CHROMA_TELEMETRY_DISABLED", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.chat import router as chat_router
+from app.api.v1.routes.chat import router as chat_router
+from app.api.v1.routes.sync import router as sync_router
 
-# Create FastAPI app
 app = FastAPI(
     title="Unreserved Property Chat API",
     description="RESTful API for conversational property listing queries",
@@ -28,20 +27,18 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change to specific origins in production
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(chat_router)
+app.include_router(chat_router)  
+app.include_router(sync_router)  
 
 
-# Root endpoint
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
@@ -50,15 +47,16 @@ async def root():
         "version": "1.0.0",
         "status": "running",
         "endpoints": {
-            "chat": "/api/chat/message",
-            "health": "/api/chat/health",
+            "chat": "/api/v1/chat/message",
+            "chat_health": "/api/v1/chat/health",
+            "sync_trigger": "/api/v1/sync/trigger",
+            "sync_status": "/api/v1/sync/status",
             "docs": "/docs",
             "redoc": "/redoc"
         }
     }
 
 
-# Health check at root level
 @app.get("/health")
 async def health():
     """Health check endpoint."""

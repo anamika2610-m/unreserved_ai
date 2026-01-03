@@ -1,8 +1,10 @@
 """
 Chunker module for splitting property listings into semantic chunks for RAG.
 """
+import json
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
+from uuid import UUID
 
 
 @dataclass
@@ -23,18 +25,34 @@ class PropertyListingChunker:
     1. Create a comprehensive overview chunk (all key info)
     2. Create specific chunks for: pricing, specifications, location, bidding
     3. Each chunk includes metadata for filtering and source tracking
+    
+    Uses semantic chunking (by topic) rather than fixed-size text splitting
+    to preserve complete context for each property aspect.
     """
     
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50):
+    def __init__(self):
+        """Initialize the chunker."""
+        pass
+    
+    @staticmethod
+    def _convert_uuids_to_strings(obj: Any) -> Any:
         """
-        Initialize the chunker.
+        Recursively convert UUID objects to strings for JSON serialization.
         
         Args:
-            chunk_size: Target size for text chunks (in characters)
-            chunk_overlap: Overlap between chunks (in characters)
+            obj: Any object that might contain UUIDs
+            
+        Returns:
+            Object with UUIDs converted to strings
         """
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+        if isinstance(obj, UUID):
+            return str(obj)
+        elif isinstance(obj, dict):
+            return {key: PropertyListingChunker._convert_uuids_to_strings(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [PropertyListingChunker._convert_uuids_to_strings(item) for item in obj]
+        else:
+            return obj
     
     def chunk_listing(self, listing: Dict[str, Any]) -> List[Chunk]:
         """
@@ -50,56 +68,55 @@ class PropertyListingChunker:
         listing_id = listing.get('id', 'unknown')
         property_id = listing.get('propertyId', 'unknown')
         
-        # Extract location metadata (lat/long) to include in ALL chunks
         location_meta = self._extract_location_metadata(listing)
         
-        # Extract media metadata
         media_meta = self._extract_media_metadata(listing)
         
         # Chunk 1: Comprehensive Overview
         overview_content = self._create_overview_chunk(listing)
-        chunks.append(Chunk(
-            content=overview_content,
-            metadata={
+        overview_metadata = self._convert_uuids_to_strings({
                 'listing_id': listing_id,
                 'property_id': property_id,
                 'chunk_type': 'overview',
                 'title': listing.get('title', ''),
                 'property_type': listing.get('propertyType', ''),
                 'location': listing.get('location', ''),
-                **location_meta,  # Include lat/long in metadata
-                **media_meta  # Include media metadata
-            },
+            **location_meta,  # Include lat/long in metadata
+            **media_meta  # Include media metadata
+        })
+        chunks.append(Chunk(
+            content=overview_content,
+            metadata=overview_metadata,
             chunk_type='overview',
             chunk_index=0,
-            listing_id=listing_id
+            listing_id=str(listing_id)  # Convert to string
         ))
         
         # Chunk 2: Pricing and Sale Method
         pricing_content = self._create_pricing_chunk(listing)
         if pricing_content:
-            chunks.append(Chunk(
-                content=pricing_content,
-                metadata={
+            pricing_metadata = self._convert_uuids_to_strings({
                     'listing_id': listing_id,
                     'property_id': property_id,
                     'chunk_type': 'pricing',
                     'listing_type': listing.get('listingType', ''),
                     'auction_status': listing.get('auctionStatus', ''),
                     'price': listing.get('price'),
+                'displayPrice': listing.get('displayPrice', False), 
                     **location_meta  # Include lat/long in metadata
-                },
+            })
+            chunks.append(Chunk(
+                content=pricing_content,
+                metadata=pricing_metadata,
                 chunk_type='pricing',
                 chunk_index=1,
-                listing_id=listing_id
+                listing_id=str(listing_id)  # Convert to string
             ))
         
         # Chunk 3: Specifications and Features
         specs_content = self._create_specifications_chunk(listing)
         if specs_content:
-            chunks.append(Chunk(
-                content=specs_content,
-                metadata={
+            specs_metadata = self._convert_uuids_to_strings({
                     'listing_id': listing_id,
                     'property_id': property_id,
                     'chunk_type': 'specifications',
@@ -107,58 +124,63 @@ class PropertyListingChunker:
                     'bathrooms': listing.get('bathrooms'),
                     'property_type': listing.get('propertyType', ''),
                     **location_meta  # Include lat/long in metadata
-                },
+            })
+            chunks.append(Chunk(
+                content=specs_content,
+                metadata=specs_metadata,
                 chunk_type='specifications',
                 chunk_index=2,
-                listing_id=listing_id
+                listing_id=str(listing_id)
             ))
         
         # Chunk 4: Location and Neighborhood
         location_content = self._create_location_chunk(listing)
         if location_content:
-            chunks.append(Chunk(
-                content=location_content,
-                metadata={
+            location_chunk_metadata = self._convert_uuids_to_strings({
                     'listing_id': listing_id,
                     'property_id': property_id,
                     'chunk_type': 'location',
-                    'slug': listing.get('slug', ''),
-                    'title': listing.get('title', ''),
-                    'listing_type': listing.get('listingType', ''),
-                    'listing_status': listing.get('listingStatus', ''),
-                    'auction_status': listing.get('auctionStatus', ''),
-                    'price': listing.get('price'),
-                    'bedrooms': listing.get('bedrooms'),
-                    'bathrooms': listing.get('bathrooms'),
-                    'landArea': listing.get('landArea'),
-                    'landArea_unit': listing.get('landAreaUnit', ''),
+                'slug': listing.get('slug', ''),
+                'title': listing.get('title', ''),
+                'listing_type': listing.get('listingType', ''),
+                'listing_status': listing.get('listingStatus', ''),
+                'auction_status': listing.get('auctionStatus', ''),
+                'price': listing.get('price'),
+                'bedrooms': listing.get('bedrooms'),
+                'bathrooms': listing.get('bathrooms'),
+                'landArea': listing.get('landArea'),
+                'landArea_unit': listing.get('landAreaUnit', ''),
                     'suburb': listing.get('suburb', ''),
                     'city': listing.get('city', ''),
                     'state': listing.get('state', ''),
-                    **location_meta,  # Include lat/long in metadata
-                    **media_meta  # Include media metadata
-                },
+                **location_meta,  # Include lat/long in metadata
+                **media_meta  # Include media metadata
+            })
+            chunks.append(Chunk(
+                content=location_content,
+                metadata=location_chunk_metadata,
                 chunk_type='location',
                 chunk_index=3,
-                listing_id=listing_id
+                listing_id=str(listing_id)
             ))
         
         # Chunk 5: Bidding and Auction Details (if applicable)
         bidding_content = self._create_bidding_chunk(listing)
         if bidding_content:
-            chunks.append(Chunk(
-                content=bidding_content,
-                metadata={
+            bidding_metadata = self._convert_uuids_to_strings({
                     'listing_id': listing_id,
                     'property_id': property_id,
                     'chunk_type': 'bidding',
                     'listing_type': listing.get('listingType', ''),
                     'auction_status': listing.get('auctionStatus', ''),
                     **location_meta  # Include lat/long in metadata
-                },
+            })
+            chunks.append(Chunk(
+                content=bidding_content,
+                metadata=bidding_metadata,
                 chunk_type='bidding',
                 chunk_index=4,
-                listing_id=listing_id
+                listing_id=str(listing_id)
             ))
         
         return chunks
@@ -197,7 +219,6 @@ class PropertyListingChunker:
         Returns:
             Dictionary with media metadata
         """
-        import json
         media_meta = {}
         
         # Get propertyMedia array
@@ -209,6 +230,37 @@ class PropertyListingChunker:
             media_meta['propertyMedia_json'] = json.dumps(property_media)
         
         return media_meta
+    
+    def _extract_highest_bid_amount(self, listing: Dict[str, Any]) -> Optional[float]:
+        """
+        Extract highest bid amount from listing.
+        Handles both nested highestBid object and flat highestBidAmount field.
+        
+        Args:
+            listing: Formatted listing dictionary
+            
+        Returns:
+            Highest bid amount or None if not available
+        """
+        highest_bid = listing.get('highestBid')
+        if highest_bid and isinstance(highest_bid, dict):
+            return highest_bid.get('bidAmount')
+        return listing.get('highestBidAmount')
+    
+    def _format_price(self, amount: Any, label: str) -> str:
+        """
+        Format a price amount with a label.
+        
+        Args:
+            amount: Price amount (numeric or string)
+            label: Label for the price (e.g., "Highest Bid", "Asking Price")
+            
+        Returns:
+            Formatted price string
+        """
+        if isinstance(amount, (int, float)):
+            return f"{label}: ${amount:,.0f}"
+        return f"{label}: {amount}"
     
     def _create_overview_chunk(self, listing: Dict[str, Any]) -> str:
         """Create a comprehensive overview chunk."""
@@ -260,6 +312,27 @@ class PropertyListingChunker:
         display_price = listing.get('displayPrice', False)
         auction_start_price = listing.get('auctionStartPrice')
         
+        # Check if displayPrice is false, null, empty, or not applicable
+        # If so, hide ALL price information
+        if not display_price:
+            parts.append("Sale Method: " + ("Auction" if listing_type == 'auction' else "Private Sale" if listing_type == 'private_sale' else listing_type))
+            # Only include non-price information
+            if listing.get('auctionStartDate'):
+                parts.append(f"Auction Start: {listing.get('auctionStartDate')}")
+            if listing.get('auctionEndDate'):
+                parts.append(f"Auction End: {listing.get('auctionEndDate')}")
+            # Add price visibility message
+            parts.append("Price: Contact agent for pricing")
+            # Still include bid/offer counts (not price amounts)
+            active_bid_count = listing.get('activeBidCount') or 0
+            if active_bid_count > 0:
+                parts.append(f"Active Bids: {active_bid_count}")
+            active_offer_count = listing.get('activeOfferCount') or 0
+            if active_offer_count > 0:
+                parts.append(f"Active Offers: {active_offer_count}")
+            return "\n".join(parts) if parts else None
+        
+        # If displayPrice is true, show all price information
         if listing_type == 'auction':
             parts.append("Sale Method: Auction")
             if auction_start_price:
@@ -270,23 +343,22 @@ class PropertyListingChunker:
                 parts.append(f"Auction End: {listing.get('auctionEndDate')}")
         elif listing_type == 'private_sale':
             parts.append("Sale Method: Private Sale")
-            if price and display_price:
+            if price:
                 parts.append(f"Asking Price: ${price:,.0f}" if isinstance(price, (int, float)) else f"Asking Price: {price}")
-            elif price and not display_price:
-                parts.append("Price: Contact agent for pricing")
         
-        # Current bidding status
+        # Current bidding status (only if displayPrice is true)
         active_bid_count = listing.get('activeBidCount') or 0
         if active_bid_count > 0:
             parts.append(f"Active Bids: {active_bid_count}")
-            if listing.get('highestBidAmount'):
-                parts.append(f"Highest Bid: ${listing.get('highestBidAmount'):,.0f}" if isinstance(listing.get('highestBidAmount'), (int, float)) else f"Highest Bid: {listing.get('highestBidAmount')}")
+            highest_bid_amount = self._extract_highest_bid_amount(listing)
+            if highest_bid_amount:
+                parts.append(self._format_price(highest_bid_amount, "Highest Bid"))
         
         active_offer_count = listing.get('activeOfferCount') or 0
         if active_offer_count > 0:
             parts.append(f"Active Offers: {active_offer_count}")
         
-        # Reverse auction info
+        # Reverse auction info (only if displayPrice is true)
         if listing.get('reverseAuctionNextDecreaseAt'):
             parts.append(f"Reverse Auction: Next decrease at {listing.get('reverseAuctionNextDecreaseAt')}")
             if listing.get('reverseAuctionDecreaseAmount'):
@@ -386,6 +458,7 @@ class PropertyListingChunker:
         
         listing_type = listing.get('listingType', '')
         auction_status = listing.get('auctionStatus', '')
+        display_price = listing.get('displayPrice', False)
         
         if listing_type == 'auction':
             parts.append("Auction Details:")
@@ -399,18 +472,22 @@ class PropertyListingChunker:
             if listing.get('activeBidCount', 0) > 0:
                 parts.append(f"\nCurrent Bidding Status:")
                 parts.append(f"Total Bids: {listing.get('activeBidCount')}")
-                if listing.get('highestBidAmount'):
-                    parts.append(f"Highest Bid: ${listing.get('highestBidAmount'):,.0f}" if isinstance(listing.get('highestBidAmount'), (int, float)) else f"Highest Bid: {listing.get('highestBidAmount')}")
+                # Only show highest bid amount if displayPrice is true
+                if display_price:
+                    highest_bid_amount = self._extract_highest_bid_amount(listing)
+                    if highest_bid_amount:
+                        parts.append(self._format_price(highest_bid_amount, "Highest Bid"))
         
-        # Reverse auction details
+        # Reverse auction details (only show price amounts if displayPrice is true)
         if listing.get('reverseAuctionNextDecreaseAt'):
             parts.append("\nReverse Auction Details:")
             parts.append(f"Next Price Decrease: {listing.get('reverseAuctionNextDecreaseAt')}")
-            if listing.get('reverseAuctionDecreaseAmount'):
+            if display_price and listing.get('reverseAuctionDecreaseAmount'):
                 parts.append(f"Decrease Amount: ${listing.get('reverseAuctionDecreaseAmount'):,.0f}" if isinstance(listing.get('reverseAuctionDecreaseAmount'), (int, float)) else f"Decrease Amount: {listing.get('reverseAuctionDecreaseAmount')}")
         
-        # Sale history
-        sale_history = listing.get('saleHistory')
+        # Sale history (only show price if displayPrice is true)
+        if display_price:
+            sale_history = listing.get('saleHistory')
         if sale_history and isinstance(sale_history, dict):
             sale_price = sale_history.get('salePrice')
             if sale_price:
