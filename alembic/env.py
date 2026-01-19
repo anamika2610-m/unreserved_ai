@@ -1,52 +1,73 @@
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config, pool
 from alembic import context
 import os
 import sys
 from pydantic_settings import BaseSettings
 
-# Add the parent directory to the path so we can import app
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-# Import your Base and models
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from app.db.base import Base
+from app.helpers.ingestion_pipeline.property.pgvector_store import PropertyEmbedding  # noqa: F401
+from app.db.models.conversation import Conversation, ChatMessage  # noqa: F401
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgresql://unreserved_user:KKnCtF4AGmJUU1xVjbunbefm3nchtK7k@dpg-d4mn42e3jp1c73a2gilg-a.oregon-postgres.render.com/unreserved"
+    """Settings for Alembic migrations.
+    
+    Database URL should be set via DATABASE_URL environment variable or .env file.
+    Never hardcode credentials in source code.
+    """
+    database_url: str = ""
     
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"
 
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
 config = context.config
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
 target_metadata = Base.metadata
-
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
 
 
 def get_url():
-    """Get database URL from environment variable if available, otherwise use default or alembic.ini"""
+    """Get database URL from environment variable if available, otherwise use default or alembic.ini.
+    Uses the same connection logic as app/db/session.py for consistency.
+    """
     env_url = os.getenv("DATABASE_URL")
     if env_url:
-        return env_url
-    ini_url = config.get_main_option("sqlalchemy.url")
-    if ini_url:
-        return ini_url
-    return Settings().database_url
+        url = env_url
+    else:
+        ini_url = config.get_main_option("sqlalchemy.url")
+        if ini_url:
+            url = ini_url
+        else:
+            url = Settings().database_url
+    
+    if not url:
+        raise ValueError(
+            "DATABASE_URL is not set. Please set it in your .env file or environment variables."
+        )
+    
+    # Use the same URL processing as app/db/session.py
+    db_url = url
+    if db_url.startswith("postgresql://"):
+        db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    
+    # Add prepare_threshold=0 (same as session.py)
+    if "?" in db_url:
+        if "prepare_threshold" not in db_url:
+            db_url += "&prepare_threshold=0"
+    else:
+        db_url += "?prepare_threshold=0"
+    
+    # Add sslmode=require if not present (for cloud databases like Render.com)
+    if "sslmode" not in db_url.lower():
+        db_url += "&sslmode=require"
+    
+    return db_url
 
 
 def run_migrations_offline() -> None:
@@ -79,17 +100,15 @@ def run_migrations_online() -> None:
 
     In this scenario we need to create an Engine
     and associate a connection with the context.
+    Uses the app's engine directly to ensure consistency.
 
     """
-    configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = get_url()
-    connectable = engine_from_config(
-        configuration,
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-
-    with connectable.connect() as connection:
+    # Import the app's engine directly - it already has all the correct SSL/connection settings
+    from app.db.session import engine as app_engine
+    
+    # Use the app's engine directly - it's already configured correctly
+    # This ensures we use the exact same connection settings that work in the app
+    with app_engine.connect() as connection:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
