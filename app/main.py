@@ -2,10 +2,10 @@
 FastAPI application for Property Chat API.
 
 Run with:
-    uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
+    uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
     
 Or:
-    python -m uvicorn app.api.main:app --reload
+    python -m uvicorn app.main:app --reload
 """
 # Import config first to set up environment variables before other imports
 import app.config  # noqa: F401
@@ -87,12 +87,6 @@ async def root():
             "redoc": "/redoc"
         }
     }
-
-
-@app.get("/health")
-async def health():
-    """Health check endpoint."""
-    return {"status": "healthy"}
 
 
 if __name__ == "__main__":
