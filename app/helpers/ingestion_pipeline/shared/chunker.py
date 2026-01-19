@@ -43,14 +43,37 @@ class PropertyListingChunker:
     @staticmethod
     def _convert_uuids_to_strings(obj: Any) -> Any:
         """
-        Initialize the chunker.
+        Recursively convert any UUID values in a nested structure to strings.
+        
+        This ensures all metadata is JSON-serializable and safe to store
+        in PostgreSQL JSONB columns.
         
         Args:
-            chunk_size: Target size for text chunks (in characters)
-            chunk_overlap: Overlap between chunks (in characters)
+            obj: Any nested structure (dict, list, tuple, UUID, etc.)
+            
+        Returns:
+            Same structure with any uuid.UUID instances converted to str
         """
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+        import uuid
+        
+        # Primitive types are returned as-is
+        if isinstance(obj, (str, int, float, bool)) or obj is None:
+            return obj
+        
+        # Convert UUIDs to strings
+        if isinstance(obj, uuid.UUID):
+            return str(obj)
+        
+        # Recurse into dictionaries
+        if isinstance(obj, dict):
+            return {k: PropertyListingChunker._convert_uuids_to_strings(v) for k, v in obj.items()}
+        
+        # Recurse into lists/tuples
+        if isinstance(obj, (list, tuple)):
+            return [PropertyListingChunker._convert_uuids_to_strings(v) for v in obj]
+        
+        # Fallback: return object as-is
+        return obj
     
     def chunk_listing(self, listing: Dict[str, Any]) -> List[Chunk]:
         """
@@ -439,6 +462,7 @@ class PropertyListingChunker:
         
         listing_type = listing.get('listingType', '')
         auction_status = listing.get('auctionStatus', '')
+        display_price = listing.get('displayPrice', False)  
         
         if listing_type == 'auction':
             parts.append("Auction Details:")
