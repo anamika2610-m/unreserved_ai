@@ -1,8 +1,7 @@
-# Import all models here
-# Example:
-# from .user import User
-# from .property import Property
-# etc.
+"""
+Database models for the application.
+"""
+from app.db.models.conversation import Conversation, ChatMessage
 
-# For now, this file is empty - models will be added based on your ERD schema
+__all__ = ["Conversation", "ChatMessage"]
 

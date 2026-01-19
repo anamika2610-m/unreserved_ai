@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  unreserved-api:
+    build:
+      context: ../..  # Project root (two levels up from infra/docker/)
+      dockerfile: infra/docker/Dockerfile
+    container_name: unreserved-api
+    image: unreserved-api:latest
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      # LLM Configuration (OpenAI only)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      
+      # Application Configuration
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # Database Configuration (PostgreSQL with pgvector)
+      - DATABASE_URL=${DATABASE_URL}
+      
+      # Python Configuration
+      - PYTHONUNBUFFERED=1
+      - TOKENIZERS_PARALLELISM=false
+    # No volumes needed - using PostgreSQL with pgvector (all data in database)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - unreserved-network
+
+networks:
+  unreserved-network:
+    driver: bridge
+

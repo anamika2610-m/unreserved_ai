@@ -26,6 +26,7 @@ wheels/
 .venv
 alembic/versions/*.pyc
 readonly_files/
+sample_data.json/
 
 # ChromaDB vector store (can be rebuilt from source data)
 chroma_db/

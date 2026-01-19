@@ -1,36 +1,8 @@
-# # fastapi==0.104.1
-# # uvicorn[standard]==0.24.0
-# # sqlalchemy==2.0.23
-# # psycopg2-binary==2.9.9
-# # alembic==1.12.1
-# # python-dotenv==1.0.0
-# # pydantic==2.5.0
-# # pydantic-settings==2.1.0
-
-# fastapi==0.115.5
-# uvicorn[standard]==0.32.0
-# sqlalchemy==2.0.36
-# psycopg[binary]==3.2.3
-# alembic==1.13.3
-# python-dotenv==1.0.1
-# pydantic==2.10.3
-# pydantic-settings==2.6.1
-
-# # RAG Pipeline Dependencies
-# langchain==0.3.10
-# langchain-community==0.3.10
-# langchain-core==0.3.51
-# langchain-text-splitters==0.3.8
-# chromadb==0.6.1
-# sentence-transformers==2.3.1
-# groq==0.9.0
-# openai==1.12.0  # Optional: Fallback if Groq is not available
-# # tiktoken==0.5.2  # Optional: Only needed for OpenAI token counting, not used in current implementation
-# watchdog==6.0.0
 
 # Core FastAPI Stack
 fastapi==0.115.5
 uvicorn[standard]==0.32.0
+python-multipart==0.0.9  # Required for file uploads (Form data)
 sqlalchemy==2.0.36
 psycopg[binary]==3.2.3
 alembic==1.13.3
@@ -43,13 +15,19 @@ langchain==0.3.10
 langchain-community==0.3.10
 langchain-core==0.3.51
 langchain-text-splitters==0.3.8
-chromadb==0.6.1
+chromadb==0.6.1  # Optional: keeping for backward compatibility
 sentence-transformers==3.3.1
 
-# LLM Clients
-groq==0.14.0
-openai==1.54.0
+# Vector Storage
+pgvector==0.3.6  # PostgreSQL vector extension
+
+# LLM Clients (OpenAI only)
+openai>=2.15.0  # Upgraded to fix httpx compatibility issue
 
 # Utilities
 watchdog==6.0.0
 psutil==6.1.1
+
+
+PyPDF2==3.0.1              # PDF text extraction
+requests==2.31.0           # HTTP requests for URL downloads 
