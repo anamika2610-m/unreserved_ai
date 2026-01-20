@@ -275,7 +275,7 @@ Comprehensive health check for all services.
 
 ### Sync
 
-#### `POST /api/v1/sync/trigger`
+#### `POST /api/v1/sync/listings` (recommended)
 
 Trigger vector embedding sync.
 
@@ -298,14 +298,14 @@ X-Webhook-Secret: your-secret-here
 
 **Example (Development - no secret needed):**
 ```bash
-curl -X POST "http://localhost:8000/api/v1/sync/trigger" \
+curl -X POST "http://localhost:8000/api/v1/sync/listings" \
   -H "Content-Type: application/json" \
   -d '{"clear_existing": false}'
 ```
 
 **Example (Production - with secret):**
 ```bash
-curl -X POST "http://localhost:8000/api/v1/sync/trigger" \
+curl -X POST "http://localhost:8000/api/v1/sync/listings" \
   -H "Content-Type: application/json" \
   -H "X-Webhook-Secret: your-secret-here" \
   -d '{"listing_ids": ["uuid-1"], "clear_existing": false}'
@@ -326,11 +326,15 @@ Sync property listings from database to vector store:
 python app/helpers/ingestion_pipeline/property/sync_pgvector.py
 
 # Or via API (requires webhook secret)
-curl -X POST "http://localhost:8000/api/v1/sync/trigger" \
+curl -X POST "http://localhost:8000/api/v1/sync/listings" \
   -H "X-Webhook-Secret: your-secret" \
   -H "Content-Type: application/json" \
   -d '{"clear_existing": false}'
 ```
+
+#### `POST /api/v1/sync/trigger` (deprecated)
+
+This is an alias for `POST /api/v1/sync/listings` kept for backward compatibility.
 
 ### Property-Specific PDFs
 

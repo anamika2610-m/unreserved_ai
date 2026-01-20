@@ -30,8 +30,6 @@ class TranscriptionResponse(BaseModel):
 )
 async def transcribe_voice(
     file: UploadFile = File(..., description="Audio file to transcribe (mp3, mp4, mpeg, mpga, m4a, wav, webm)"),
-    listing_id: Optional[str] = Form(None, description="Optional listing ID for context"),
-    user_id: Optional[str] = Form(None, description="Optional user ID for context"),
 ) -> TranscriptionResponse:
     """
     Transcribe voice input to text using OpenAI Whisper model.
@@ -48,8 +46,7 @@ async def transcribe_voice(
     **Example**:
     ```bash
     curl -X POST "http://localhost:8000/api/v1/voice/transcribe" \\
-      -F "file=@audio.mp3" \\
-      -F "listing_id=950b945a-5604-49a0-9cf9-3d3c16cf9c1a"
+      -F "file=@audio.mp3"
     ```
     """
     temp_file_path = None
@@ -187,7 +184,7 @@ async def transcribe_and_chat(
     
     try:
         # First, transcribe the audio
-        transcription_result = await transcribe_voice(file, listing_id, user_id)
+        transcription_result = await transcribe_voice(file)
         transcribed_text = transcription_result.text
         
         # Then, use the transcribed text in the chat endpoint

@@ -81,7 +81,9 @@ async def root():
             "voice_transcribe": "/api/v1/voice/transcribe",
             "voice_transcribe_and_chat": "/api/v1/voice/transcribe-and-chat",
             "voice_realtime_ws": "ws://localhost:8000/api/v1/voice/transcribe-realtime",
-            "sync_trigger": "/api/v1/sync/trigger",
+            "sync_listings": "/api/v1/sync/listings",
+            "sync_property_pdfs": "/api/v1/sync/property-pdfs",
+            "sync_generic_pdfs": "/api/v1/sync/generic-pdfs",
             "sync_status": "/api/v1/sync/status",
             "docs": "/docs",
             "redoc": "/redoc"

@@ -13,7 +13,7 @@ from datetime import datetime
 from uuid import UUID
 
 from app.schemas import BuyerEnquiry
-from app.services.rag_pipeline.preprocess import preprocess_enquiry
+from app.services.rag_pipeline.preprocess import preprocess_enquiry, detect_query_source
 from app.services.rag_pipeline.generation import ResponseGenerator
 from app.db.session import get_db
 from app.db.postgres.repositories.conversation_repository import ConversationRepository
@@ -47,8 +47,8 @@ class ChatRequest(BaseModel):
 
     question: str = Field(..., description="User's question about the property or general real estate query")
 
-    listing_id: Optional[UUID] = Field(
-        None, description="Property listing ID (UUID). Optional for generic questions."
+    listing_id: UUID = Field(
+        ..., description="Property listing ID (UUID). Required."
     )
 
     user_id: Optional[UUID] = Field(
@@ -107,18 +107,14 @@ async def chat_message(
         # ----------------------------------------------------------
         # Default user_id for anonymous/generic queries
         user_id = request.user_id or uuid5(NAMESPACE_DNS, "api_user")
-        
-        # For generic questions, listing_id remains None
-        # Database now supports NULL listing_id for generic conversations
+
         listing_id = request.listing_id
-        is_generic_query = (listing_id is None)
         
         conversation_repo = ConversationRepository(db)
 
         # ----------------------------------------------------------
-        # Get or create conversation
-        # - Generic questions: listing_id=NULL (allows multiple generic conversations per user)
-        # - Property questions: one conversation per (user_id, listing_id)
+        # Get or create conversation (scoped by user_id + listing_id)
+        # Query may still be generic; routing is decided by text, not listing_id presence.
         # ----------------------------------------------------------
         conversation = conversation_repo.get_or_create_conversation(
             user_id=user_id,
@@ -135,8 +131,26 @@ async def chat_message(
             n_messages=10,
         )
 
+        enquiry = BuyerEnquiry(
+            question=request.question,
+            listing_id=listing_id,
+            user_id=user_id,
+        )
+
+        enquiry_data = preprocess_enquiry(enquiry)
+
         # ----------------------------------------------------------
-        # Store user message AFTER fetching history
+        # Detect whether the query is GENERIC vs PROPERTY-specific
+        # This uses the text + conversation history, not listing_id.
+        # ----------------------------------------------------------
+        source = detect_query_source(
+            enquiry_data["normalized_query"],
+            conversation_history=conversation_history,
+        )
+        is_generic_query = (source == "generic")
+
+        # ----------------------------------------------------------
+        # Store user message AFTER fetching history & determining query type
         # ----------------------------------------------------------
         conversation_repo.add_message(
             conversation_id=conversation.id,
@@ -147,15 +161,6 @@ async def chat_message(
                 "query_type": "generic" if is_generic_query else "property_specific",
             },
         )
-
-       
-        enquiry = BuyerEnquiry(
-            question=request.question,
-            listing_id=listing_id,  # None for generic, UUID for property-specific
-            user_id=user_id,
-        )
-
-        enquiry_data = preprocess_enquiry(enquiry)
 
         # ----------------------------------------------------------
         # Generate AI response (RAG)

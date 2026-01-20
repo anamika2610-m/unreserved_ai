@@ -74,12 +74,14 @@ LOCATION-BASED QUERIES (NEW):
       * If Google Maps links for amenities are provided (they will be passed in separately), you MUST:
         - NOT mention latitude/longitude in your answer.
         - **🚨 MANDATORY: ALWAYS include the Google Maps link reference in your response**, even if you mention specific amenities from the data
-        - **If you mention specific amenities from the listing data, you MUST add this exact phrase**: "You can also use the link below to find more [amenity type] in the area for reference."
-        - **If the listing data does NOT contain specific amenity information, you MUST say**: "You can find nearby [amenity type] using the link provided below."
+        - **If you mention specific amenities from the listing data, add**: "You can also use the link(s) below to find more amenities in the area for reference."
+        - **If the listing data does NOT contain specific amenity information, say**: "You can find nearby amenities using the link(s) provided below."
+        - **Always use "link" (singular) if only one link is provided, "links" (plural) if multiple links are provided**
+        - **Always use the generic word "amenities" (not specific types like "schools") when referring to the links, since multiple amenity types may be provided**
         - **Examples (you MUST follow this format)**:
-          * With specific data: "According to the property information, nearby schools include **Boneo Primary School** (approximately **5.5 km** away) and **Rosebud Secondary College** (about **10 km** away). **You can also use the link below to find more schools in the area for reference.**"
-          * Without specific data: "You can find nearby schools using the link provided below."
-        - **DO NOT forget to mention the link - this is mandatory when amenity links are provided**
+          * With specific data: "According to the property information, nearby schools include **Boneo Primary School** (approximately **5.5 km** away) and **Rosebud Secondary College** (about **10 km** away). **You can also use the links below to find more amenities in the area for reference.**"
+          * Without specific data: "You can find nearby amenities using the links provided below."
+        - **DO NOT forget to mention the link(s) - this is mandatory when amenity links are provided**
       * If links are NOT available, you may suggest using mapping services with the property's location, but avoid printing raw latitude/longitude values; instead, refer to "this location" or "the property's location".
       * If nearby properties are provided in the context, mention them when relevant.
     - For **transport** (bus stops, train stations, metro, tram, etc.):
@@ -263,7 +265,7 @@ def create_user_prompt(
     
     amenity_note = ""
     if has_amenity_links:
-        amenity_note = "\n\n🚨 IMPORTANT - AMENITY LINKS: Google Maps links for the requested amenities will be provided below your response. \n\n**MANDATORY INSTRUCTIONS:**\n- If you mention specific amenities from the listing data (e.g., school names, hospital names), you MUST add this exact phrase: 'You can also use the link below to find more [amenity type] in the area for reference.'\n- If you do NOT mention specific amenities from the data, say: 'You can find nearby [amenity type] using the link provided below.'\n- Always specify the exact amenity type (hospitals, schools, gyms, etc.) that the link is for.\n- Examples:\n  * With specific data: 'According to the property information, nearby schools include **Boneo Primary School** (approximately **5.5 km** away). You can also use the link below to find more schools in the area for reference.'\n  * Without specific data: 'You can find nearby schools using the link provided below.'"
+        amenity_note = "\n\n🚨 IMPORTANT - AMENITY LINKS: Google Maps links for the requested amenities will be provided below your response. \n\n**MANDATORY INSTRUCTIONS:**\n- If you mention specific amenities from the listing data (e.g., school names, hospital names), you MUST add: 'You can also use the link(s) below to find more amenities in the area for reference.'\n- If you do NOT mention specific amenities from the data, say: 'You can find nearby amenities using the link(s) provided below.'\n- Always use 'link' (singular) if only one link is provided, 'links' (plural) if multiple links are provided\n- Always use the generic word 'amenities' (not specific types like 'schools') when referring to the links, since multiple amenity types may be provided\n- Examples:\n  * With specific data: 'According to the property information, nearby schools include **Boneo Primary School** (approximately **5.5 km** away). You can also use the links below to find more amenities in the area for reference.'\n  * Without specific data: 'You can find nearby amenities using the links provided below.'"
     
     # Check if the last user message in history was "yes" (indicating this was rewritten)
     rewritten_note = ""
