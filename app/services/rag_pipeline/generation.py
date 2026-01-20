@@ -780,11 +780,19 @@ class ResponseGenerator:
             else:
                 print(f"✅ User did not ask about nearby properties - excluding from response (query_type: {query_type})")
         
+        # Combine relevant and suggested links (suggested only if no relevant)
+        final_amenity_links = []
+        if amenity_links:
+            relevant = amenity_links.get('relevant_links', [])
+            suggested = amenity_links.get('suggested_links', [])
+            # Use relevant links if available, otherwise use suggested links
+            final_amenity_links = relevant if relevant else suggested
+        
         return {
             "ai_response": ai_response,
             "log_entry": log_entry,
             "nearby_properties": nearby_properties_json,
-            "amenity_links": amenity_links.get('relevant_links', []) if amenity_links else [],
+            "amenity_links": final_amenity_links,
         }
     
     # ------------------------------------------------------------------

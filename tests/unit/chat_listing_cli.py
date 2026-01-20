@@ -67,7 +67,7 @@ def main():
             print("   The bot may not be able to answer questions about this property.")
             print("\n   To fix this:")
             print("   1. Run: python tests/unit/sync_pgvector.py")
-            print("   2. Or sync specific listing via API: POST /api/v1/sync/trigger")
+            print("   2. Or sync specific listing via API: POST /api/v1/sync/listings")
             print("\n   Continue anyway? (y/n): ", end="")
             response = input().strip().lower()
             if response != 'y':

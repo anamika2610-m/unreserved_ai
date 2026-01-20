@@ -57,7 +57,9 @@ AMENITY_INDICATORS = [
     'police', 'fire station', 'fire stations', 'emergency',
     # Other common places
     'post office', 'post offices', 'convenience', 'bookstore', 'bookstores',
-    'florist', 'florists', 'jewelry', 'jeweler', 'jewelers'
+    'florist', 'florists', 'jewelry', 'jeweler', 'jewelers',
+    # Generic amenity terms (must be last to avoid false positives)
+    'amenity', 'amenities', 'places', 'facilities', 'services'
 ]
 
 # Question indicators for amenity queries
@@ -83,7 +85,15 @@ STOP_WORDS = {
     'are', 'is', 'there', 'any', 'the', 'a', 'an', 'to', 'by', 'me',
     'list', 'down', 'show', 'find', 'tell', 'me', 'about',
     'what', 'how', 'where', 'which', 'can', 'you', 'i',
-    'want', 'need', 'looking', 'for', 'some'
+    'want', 'need', 'looking', 'for', 'some',
+    # Reference words
+    'this', 'that', 'these', 'those', 'here', 'there'
+}
+
+# Generic amenity terms that should NOT be used as search terms
+# These trigger fallback to predefined amenities instead
+GENERIC_AMENITY_TERMS = {
+    'amenity', 'amenities', 'places', 'facilities', 'services', 'location', 'locations'
 }
 
 # Common amenities for default suggestions
@@ -318,6 +328,15 @@ def extract_amenity_search_terms(query: str) -> List[str]:
         
         if filtered_words:
             search_term = ' '.join(filtered_words)
+            # Skip if the search term is only generic amenity terms (amenities, places, etc.)
+            # These should trigger fallback to predefined amenities instead
+            search_term_lower = search_term.lower()
+            if any(generic_term in search_term_lower for generic_term in GENERIC_AMENITY_TERMS):
+                # If the term contains ONLY generic words, skip it
+                words_in_term = search_term_lower.split()
+                if all(word in GENERIC_AMENITY_TERMS for word in words_in_term):
+                    continue  # Skip generic-only terms
+            
             # Validation - should be 1-3 words and at least 3 characters total
             if 1 <= len(filtered_words) <= 3 and len(search_term) >= 3:
                 search_terms.append(search_term)
