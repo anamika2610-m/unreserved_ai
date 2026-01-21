@@ -4,6 +4,7 @@ Stores generic PDFs like legislation, buyer guides, auction rules, etc.
 Uses OpenAI embeddings for semantic search.
 """
 import json
+import uuid
 from contextlib import contextmanager
 from decimal import Decimal
 from typing import List, Dict, Any, Optional
@@ -160,7 +161,10 @@ class GenericKnowledgeStore:
                 embedding = embeddings[0] if embeddings else []
                 
                 # Generate unique ID
-                chunk_id = f"{chunk.doc_category}_{chunk.chunk_index}"
+                # NOTE: In some databases the `id` column is of type UUID.
+                # Using a proper UUID string here avoids errors like:
+                # "invalid input syntax for type uuid: 'general_17'".
+                chunk_id = str(uuid.uuid4())
                 
                 # Sanitize metadata (convert Decimal to float)
                 sanitized_metadata = self._sanitize_metadata(chunk.metadata)

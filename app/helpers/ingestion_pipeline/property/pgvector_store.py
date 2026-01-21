@@ -7,7 +7,7 @@ import time
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
 from sqlalchemy import text, Column, String, Integer, Text, Index
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
 from pgvector.sqlalchemy import Vector
@@ -32,7 +32,11 @@ class PropertyEmbedding(Base):
     """
     __tablename__ = "property_embeddings"
     
-    id = Column(String, primary_key=True)  # Format: {listing_id}_{chunk_type}_{index}
+    # NOTE:
+    # In some databases this column is created as UUID. We model it as UUID here
+    # and use a separate logical key (listing_id + chunk_type + chunk_index)
+    # instead of overloading `id` with a composite string.
+    id = Column(UUID(as_uuid=False), primary_key=True)
     listing_id = Column(String, nullable=False, index=True)
     chunk_type = Column(String, nullable=False, index=True)  # overview, pricing, specifications, location, bidding
     chunk_index = Column(Integer, nullable=False)
@@ -215,11 +219,18 @@ class PgVectorStore:
         for attempt in range(max_retries):
             try:
                 for chunk, embedding in zip(chunks, embeddings):
-                    chunk_id = f"{chunk.listing_id}_{chunk.chunk_type}_{chunk.chunk_index}"
-                    
-                    existing = self.db_session.query(PropertyEmbedding).filter(
-                        PropertyEmbedding.id == chunk_id
-                    ).first()
+                    # Logical key for upserts: (listing_id, chunk_type, chunk_index)
+                    listing_id_str = str(chunk.listing_id)
+
+                    existing = (
+                        self.db_session.query(PropertyEmbedding)
+                        .filter(
+                            PropertyEmbedding.listing_id == listing_id_str,
+                            PropertyEmbedding.chunk_type == chunk.chunk_type,
+                            PropertyEmbedding.chunk_index == chunk.chunk_index,
+                        )
+                        .first()
+                    )
                     
                     # Sanitize metadata to avoid non-JSON-serializable types (e.g. Decimal)
                     sanitized_metadata = self._sanitize_metadata(chunk.metadata) if chunk.metadata is not None else None
@@ -233,14 +244,16 @@ class PgVectorStore:
                         existing.chunk_metadata = sanitized_metadata
                         updated_count += 1
                     else:
+                        import uuid
+
                         new_embedding = PropertyEmbedding(
-                            id=chunk_id,
-                            listing_id=chunk.listing_id,
+                            id=str(uuid.uuid4()),
+                            listing_id=listing_id_str,
                             chunk_type=chunk.chunk_type,
                             chunk_index=chunk.chunk_index,
                             content=chunk.content,
                             embedding=embedding_list,
-                            chunk_metadata=sanitized_metadata
+                            chunk_metadata=sanitized_metadata,
                         )
                         self.db_session.add(new_embedding)
                         added_count += 1
