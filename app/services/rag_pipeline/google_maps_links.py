@@ -86,6 +86,9 @@ STOP_WORDS = {
     'list', 'down', 'show', 'find', 'tell', 'me', 'about',
     'what', 'how', 'where', 'which', 'can', 'you', 'i',
     'want', 'need', 'looking', 'for', 'some',
+    # Non-amenity terms that often appear alongside amenity questions
+    # (e.g., "pricing and amenities") but should NEVER be used for Maps searches
+    'price', 'prices', 'pricing', 'cost', 'costs',
     # Reference words
     'this', 'that', 'these', 'those', 'here', 'there'
 }

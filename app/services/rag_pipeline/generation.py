@@ -499,8 +499,9 @@ class ResponseGenerator:
         
         # 5️⃣ Check if this is an amenity query (to pass has_amenity_links flag)
         # We need to check this BEFORE creating the prompt so the LLM knows to mention the link
+        # IMPORTANT: For pure pricing questions, we do NOT want amenity links at all.
         has_amenity_links_flag = False
-        if is_amenity_query(query):
+        if enquiry_type != "price" and is_amenity_query(query):
             # Try to get location from location_context first
             latitude = None
             longitude = None
@@ -705,11 +706,12 @@ class ResponseGenerator:
         # 9️⃣ Generate amenity links if it's an amenity query
         # IMPORTANT: Always generate links for amenity queries when listing_id is present,
         # regardless of where the answer came from (property PDFs, generic knowledge, etc.)
+        # BUT: For pure pricing questions (enquiry_type == "price"), skip amenity links entirely.
         amenity_links = []
         is_amenity = is_amenity_query(query)
         print(f"🔍 Query: '{query}'")
-        print(f"🔍 Is amenity query? {is_amenity}")
-        if is_amenity and listing_id:
+        print(f"🔍 Is amenity query? {is_amenity} (enquiry_type={enquiry_type})")
+        if is_amenity and listing_id and enquiry_type != "price":
             # Get latitude/longitude from location_context first
             latitude = None
             longitude = None
@@ -757,7 +759,7 @@ class ResponseGenerator:
                 print(f"   → Generated {len(amenity_links.get('suggested_links', []))} suggested links")
             else:
                 print(f"⚠️  Cannot generate amenity links: missing latitude/longitude (listing_id: {listing_id})")
-        elif is_amenity_query(query) and not listing_id:
+        elif is_amenity_query(query) and not listing_id and enquiry_type != "price":
             print(f"⚠️  Amenity query detected but no listing_id provided - cannot generate links")
         else:
             if not is_amenity:

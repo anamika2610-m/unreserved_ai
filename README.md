@@ -200,9 +200,40 @@ Send a message to the chatbot.
 }
 ```
 
-#### `GET /api/v1/chat/history/{conversation_id}`
+#### `GET /api/v1/chat/history`
 
-Get conversation history.
+Get conversation history using query parameters.
+
+**Query Parameters:**
+- `user_id` (required): User ID (UUID)
+- `listing_id` (required): Listing ID (UUID)
+
+The endpoint returns up to **40** most recent messages in the conversation.
+
+**Example:**
+```
+GET /api/v1/chat/history?user_id=22c91760-ac98-4d05-b545-cdb5a7a8d23f&listing_id=950b945a-5604-49a0-9cf9-3d3c16cf9c1a
+```
+
+**Response:**
+```json
+{
+  "conversation_id": "6a57903b-0e5d-4b60-8d50-0df627693943",
+  "messages": [
+    {
+      "role": "user",
+      "content": "What is the price?",
+      "metadata": {...}
+    },
+    {
+      "role": "bot",
+      "content": "The asking price is $399,000...",
+      "metadata": {...}
+    }
+  ],
+  "total_messages": 2
+}
+```
 
 ### Voice Transcription
 
@@ -314,6 +345,30 @@ curl -X POST "http://localhost:8000/api/v1/sync/listings" \
 #### `GET /api/v1/sync/status`
 
 Get sync status.
+
+#### `POST /api/v1/sync/generic-pdfs` and `POST /api/v1/sync/generic-pdfs-async`
+
+Sync **generic knowledge PDFs** from the server’s `app/knowledge_base/` folder into `generic_knowledge`.
+
+- Use `generic-pdfs-async` in production to avoid request timeouts.
+
+#### `POST /api/v1/sync/generic-pdfs/upload` and `POST /api/v1/sync/generic-pdfs/upload-async`
+
+Upload **one or more text-based PDFs** (rejects scanned/image-only PDFs) and sync them into `generic_knowledge`.
+
+- **Limits** (configurable):
+  - `GENERIC_PDF_MAX_MB` (default: 20) per file
+  - `GENERIC_PDF_MAX_FILES` (default: 10) per request
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/sync/generic-pdfs/upload" \
+  -H "X-Webhook-Secret: your-secret-here" \
+  -F "re_index=false" \
+  -F "category=legislation" \
+  -F "files=@./docs/guide1.pdf" \
+  -F "files=@./docs/guide2.pdf"
+```
 
 ## 📥 Data Ingestion
 

@@ -3,8 +3,10 @@ API endpoints for syncing vector embeddings with database listings.
 These endpoints can be called via webhook when listings are added/updated.
 """
 import os
+import shutil
+import tempfile
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Header
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Header, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from contextlib import contextmanager
 
@@ -101,8 +103,18 @@ class GenericPDFSyncResponse(BaseModel):
     chunks_created: int
 
 
+class GenericPDFUploadResponse(BaseModel):
+    status: str
+    message: str
+    files_received: int
+    files_rejected: int
+    documents_processed: int
+    documents_skipped: int
+    chunks_created: int
+
+
 # Webhook secret for security
-WEBHOOK_SECRET = os.getenv("VECTOR_SYNC_WEBHOOK_SECRET", "change-me-in-production")
+# WEBHOOK_SECRET = os.getenv("VECTOR_SYNC_WEBHOOK_SECRET", "change-me-in-production")
 REQUIRE_WEBHOOK_SECRET = os.getenv("REQUIRE_WEBHOOK_SECRET", "true").lower() == "true"
 
 
@@ -117,14 +129,14 @@ def verify_webhook_secret(x_webhook_secret: Optional[str] = Header(None)):
         # Development mode - secret is optional
         return
     
-    if WEBHOOK_SECRET == "change-me-in-production":
+    if REQUIRE_WEBHOOK_SECRET == "change-me-in-production":
         # Default secret in production is a security risk
         raise HTTPException(
             status_code=500,
-            detail="Webhook secret not configured. Set VECTOR_SYNC_WEBHOOK_SECRET environment variable."
+            detail="Webhook secret not configured. Set REQUIRE_WEBHOOK_SECRET environment variable."
         )
     
-    if x_webhook_secret != WEBHOOK_SECRET:
+    if x_webhook_secret != REQUIRE_WEBHOOK_SECRET:
         raise HTTPException(
             status_code=401,
             detail="Invalid webhook secret"
@@ -166,13 +178,18 @@ def perform_sync(
     
     # Initialize pgvector store
     vector_store = PgVectorStore(
-        embedding_model="all-MiniLM-L6-v2"
+        embedding_model="text-embedding-3-small"
     )
     
-    # Clear if explicitly requested (WARNING: deletes ALL embeddings including property_document chunks!)
+    # IMPORTANT: We no longer clear all embeddings from this endpoint.
+    # `clear_existing` is accepted for backwards compatibility, but ignored
+    # to ensure vector embeddings persist across syncs.
     if clear_existing:
-        print("⚠️  WARNING: Clearing all embeddings (including property_document chunks)")
-        vector_store.clear_all()
+        print(
+            "ℹ️  clear_existing was requested, but full reset of embeddings is "
+            "disabled to preserve existing vectors. Run a manual maintenance "
+            "job if you truly need to wipe the vector store."
+        )
     
     # Add chunks
     vector_store.add_chunks(all_chunks)
@@ -231,14 +248,14 @@ async def sync_listings(
 
 
 # Backward-compatible alias (old name)
-@router.post("/trigger", response_model=SyncResponse, include_in_schema=False)
-async def trigger_sync(
-    request: SyncRequest,
-    background_tasks: BackgroundTasks,
-    x_webhook_secret: Optional[str] = Header(None),
-):
-    """Deprecated alias of `POST /api/v1/sync/listings`."""
-    return await _sync_listings_handler(request=request, x_webhook_secret=x_webhook_secret)
+# @router.post("/trigger", response_model=SyncResponse, include_in_schema=False)
+# async def trigger_sync(
+#     request: SyncRequest,
+#     background_tasks: BackgroundTasks,
+#     x_webhook_secret: Optional[str] = Header(None),
+# ):
+#     """Deprecated alias of `POST /api/v1/sync/listings`."""
+#     return await _sync_listings_handler(request=request, x_webhook_secret=x_webhook_secret)
 
 
 @router.post("/listings-async", response_model=dict)
@@ -273,19 +290,19 @@ async def sync_listings_async(
     }
 
 
-# Backward-compatible alias (old name)
-@router.post("/trigger-async", response_model=dict, include_in_schema=False)
-async def trigger_sync_async(
-    request: SyncRequest,
-    background_tasks: BackgroundTasks,
-    x_webhook_secret: Optional[str] = Header(None),
-):
-    """Deprecated alias of `POST /api/v1/sync/listings-async`."""
-    return await sync_listings_async(
-        request=request,
-        background_tasks=background_tasks,
-        x_webhook_secret=x_webhook_secret,
-    )
+# # Backward-compatible alias (old name)
+# @router.post("/trigger-async", response_model=dict, include_in_schema=False)
+# async def trigger_sync_async(
+#     request: SyncRequest,
+#     background_tasks: BackgroundTasks,
+#     x_webhook_secret: Optional[str] = Header(None),
+# ):
+#     """Deprecated alias of `POST /api/v1/sync/listings-async`."""
+#     return await sync_listings_async(
+#         request=request,
+#         background_tasks=background_tasks,
+#         x_webhook_secret=x_webhook_secret,
+#     )
 
 
 @router.get("/status", response_model=SyncStatusResponse)
@@ -535,6 +552,351 @@ def perform_generic_pdf_sync(re_index: bool = False) -> dict:
         raise Exception(f"Generic PDF sync failed: {str(e)}")
     finally:
         knowledge_store.close()
+
+
+@router.post("/generic-pdfs/upload", response_model=GenericPDFUploadResponse)
+async def sync_generic_pdfs_upload(
+    background_tasks: BackgroundTasks,
+    x_webhook_secret: Optional[str] = Header(None),
+    files: List[UploadFile] = File(..., description="One or more text-based PDF files (no scanned/image-only PDFs)."),
+    re_index: bool = Form(False, description="If true, re-index documents (replace existing chunks for these files)."),
+    category: Optional[str] = Form(None, description="Optional category label for uploaded documents (default: uploads)."),
+):
+    """
+    Upload one or more **text** PDFs and sync them into `generic_knowledge`.
+
+    - Rejects scanned/image-only PDFs (must have extractable text).
+    - Enforces file size and max file count limits via env vars:
+      - GENERIC_PDF_MAX_MB (default: 20)
+      - GENERIC_PDF_MAX_FILES (default: 10)
+    """
+    verify_webhook_secret(x_webhook_secret)
+
+    # CRITICAL: Validate BEFORE any file processing
+    max_mb, max_files = _get_generic_upload_limits()
+    
+    # Check 1: Max file count limit
+    if len(files) > max_files:
+        error_msg = f"Too many files. Max allowed: {max_files}, received: {len(files)}"
+        print(f"❌ File upload rejected: {error_msg}")
+        raise HTTPException(status_code=400, detail=error_msg)
+
+    # Check 2: File extension validation - reject if ANY non-PDF is found
+    rejected_files = []
+    for f in files:
+        name = (f.filename or "").strip()
+        if not name:
+            rejected_files.append("(no filename)")
+        elif not name.lower().endswith(".pdf"):
+            rejected_files.append(name)
+    
+    if rejected_files:
+        error_msg = f"Only PDF files are allowed. Rejected files: {', '.join(rejected_files)}"
+        print(f"❌ File upload rejected: {error_msg}")
+        raise HTTPException(
+            status_code=400,
+            detail=error_msg
+        )
+
+    # Only proceed if ALL validations pass
+    # Stage uploads to a temp directory we can clean up after processing
+    tmp_dir = Path(tempfile.mkdtemp(prefix="generic_pdfs_"))
+    max_bytes = max_mb * 1024 * 1024
+
+    accepted_paths: List[Path] = []
+    rejected = 0
+
+    try:
+        for f in files:
+            name = (f.filename or "").strip()
+            
+            # Double-check validation (safety net)
+            if not name or not name.lower().endswith(".pdf"):
+                print(f"⚠️  WARNING: Invalid file detected during processing: {name}")
+                rejected += 1
+                continue
+
+            dest = tmp_dir / name
+            try:
+                _save_upload_to_disk(f, dest, max_bytes=max_bytes)
+                accepted_paths.append(dest)
+            except ValueError as e:
+                print(f"⚠️  File rejected (size limit): {name}")
+                rejected += 1
+            except Exception as e:
+                print(f"⚠️  File rejected (error): {name} - {str(e)}")
+                rejected += 1
+
+        if not accepted_paths:
+            # Clean temp dir immediately
+            try:
+                shutil.rmtree(tmp_dir)
+            except Exception:
+                pass
+            raise HTTPException(status_code=400, detail="No valid PDF files received (check file type/size).")
+
+        result = perform_generic_pdf_sync_from_files(
+            pdf_paths=accepted_paths,
+            re_index=re_index,
+            category=category,
+            cleanup_dir=tmp_dir,
+        )
+        return GenericPDFUploadResponse(
+            status=result["status"],
+            message=result["message"],
+            files_received=len(files),
+            files_rejected=rejected,
+            documents_processed=result["documents_processed"],
+            documents_skipped=result["documents_skipped"],
+            chunks_created=result["chunks_created"],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Best-effort cleanup
+        try:
+            shutil.rmtree(tmp_dir)
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Generic PDF upload sync failed: {str(e)}")
+
+
+@router.post("/generic-pdfs/upload-async", response_model=dict)
+async def sync_generic_pdfs_upload_async(
+    background_tasks: BackgroundTasks,
+    x_webhook_secret: Optional[str] = Header(None),
+    files: List[UploadFile] = File(..., description="One or more text-based PDF files (no scanned/image-only PDFs)."),
+    re_index: bool = Form(False, description="If true, re-index documents (replace existing chunks for these files)."),
+    category: Optional[str] = Form(None, description="Optional category label for uploaded documents (default: uploads)."),
+):
+    """
+    Async version of `/generic-pdfs/upload`.
+    Immediately returns and processes the PDFs in a background task.
+    """
+    verify_webhook_secret(x_webhook_secret)
+
+    # CRITICAL: Validate BEFORE any file processing
+    max_mb, max_files = _get_generic_upload_limits()
+    
+    # Check 1: Max file count limit
+    if len(files) > max_files:
+        error_msg = f"Too many files. Max allowed: {max_files}, received: {len(files)}"
+        print(f"❌ File upload rejected: {error_msg}")
+        raise HTTPException(status_code=400, detail=error_msg)
+
+    # Check 2: File extension validation - reject if ANY non-PDF is found
+    rejected_files = []
+    for f in files:
+        name = (f.filename or "").strip()
+        if not name:
+            rejected_files.append("(no filename)")
+        elif not name.lower().endswith(".pdf"):
+            rejected_files.append(name)
+    
+    if rejected_files:
+        error_msg = f"Only PDF files are allowed. Rejected files: {', '.join(rejected_files)}"
+        print(f"❌ File upload rejected: {error_msg}")
+        raise HTTPException(
+            status_code=400,
+            detail=error_msg
+        )
+
+    # Only proceed if ALL validations pass
+    tmp_dir = Path(tempfile.mkdtemp(prefix="generic_pdfs_"))
+    max_bytes = max_mb * 1024 * 1024
+
+    accepted_paths: List[Path] = []
+    rejected = 0
+
+    for f in files:
+        name = (f.filename or "").strip()
+        
+        # Double-check validation (safety net)
+        if not name or not name.lower().endswith(".pdf"):
+            print(f"⚠️  WARNING: Invalid file detected during processing: {name}")
+            rejected += 1
+            continue
+            
+        dest = tmp_dir / name
+        try:
+            _save_upload_to_disk(f, dest, max_bytes=max_bytes)
+            accepted_paths.append(dest)
+        except ValueError as e:
+            print(f"⚠️  File rejected (size limit): {name}")
+            rejected += 1
+        except Exception as e:
+            print(f"⚠️  File rejected (error): {name} - {str(e)}")
+            rejected += 1
+
+    if not accepted_paths:
+        try:
+            shutil.rmtree(tmp_dir)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail="No valid PDF files received (check file type/size).")
+
+    # Run in background; cleanup_dir deletes temp files at the end.
+    background_tasks.add_task(
+        perform_generic_pdf_sync_from_files,
+        accepted_paths,
+        re_index,
+        category,
+        tmp_dir,
+    )
+
+    return {
+        "status": "accepted",
+        "message": "Generic PDF upload sync started in background",
+        "files_received": len(files),
+        "files_rejected": rejected,
+        "max_mb_per_file": max_mb,
+        "max_files": max_files,
+    }
+
+
+def _get_generic_upload_limits() -> tuple[int, int]:
+    """
+    Return (max_mb_per_file, max_files) limits for generic PDF upload.
+    """
+    max_mb = int(os.getenv("GENERIC_PDF_MAX_MB", "20"))
+    max_files = int(os.getenv("GENERIC_PDF_MAX_FILES", "10"))
+    return max_mb, max_files
+
+
+def _save_upload_to_disk(file: UploadFile, dest_path: Path, max_bytes: int) -> int:
+    """
+    Save UploadFile to disk enforcing a hard max_bytes limit.
+    Returns bytes written.
+    """
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with open(dest_path, "wb") as out:
+        while True:
+            chunk = file.file.read(1024 * 1024)  # 1MB
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > max_bytes:
+                raise ValueError("File too large")
+            out.write(chunk)
+    return written
+
+
+def perform_generic_pdf_sync_from_files(
+    pdf_paths: List[Path],
+    re_index: bool = False,
+    category: Optional[str] = None,
+    cleanup_dir: Optional[Path] = None,
+) -> dict:
+    """
+    Perform generic PDF sync operation for a provided list of PDF files.
+    Validates that each PDF has extractable text (rejects scanned/image-only PDFs).
+    """
+    from app.helpers.ingestion_pipeline.generic.sync_generic_pdfs import compute_content_hash
+    from app.helpers.ingestion_pipeline.generic.generic_knowledge_store import GenericChunk
+    from sqlalchemy import text as sql_text
+
+    DEFAULT_CHUNK_SIZE = 500
+    DEFAULT_CHUNK_OVERLAP = 50
+
+    pdf_processor = PDFProcessor(chunk_size=DEFAULT_CHUNK_SIZE)
+    knowledge_store = GenericKnowledgeStore()
+
+    try:
+        knowledge_store.initialize_table()
+
+        total_chunks = 0
+        processed_docs = 0
+        skipped_docs = 0
+
+        for pdf_path in pdf_paths:
+            try:
+                # Use a stable "file_path" identifier for de-dupe and auditing
+                safe_name = pdf_path.name
+                doc_category = (category or "uploads").lower().strip() or "uploads"
+                metadata = {
+                    "title": Path(safe_name).stem,
+                    "file_name": safe_name,
+                    "file_path": f"uploads/{safe_name}",
+                    "category": doc_category,
+                    "type": "generic_knowledge",
+                }
+
+                text = pdf_processor.extract_from_file(str(pdf_path))
+                if not text:
+                    # No extracted text => scanned/image-only (or corrupted)
+                    skipped_docs += 1
+                    continue
+
+                content_hash = compute_content_hash(text)
+                metadata["content_hash"] = content_hash
+
+                # If not re-indexing, skip unchanged docs, else replace
+                check_query = sql_text("""
+                    SELECT COUNT(*) FROM generic_knowledge
+                    WHERE metadata->>'file_path' = :file_path
+                    AND metadata->>'content_hash' = :content_hash
+                """)
+                result = knowledge_store.db_session.execute(
+                    check_query,
+                    {"file_path": metadata["file_path"], "content_hash": content_hash},
+                )
+                existing_count = result.scalar() or 0
+
+                if not re_index and existing_count > 0:
+                    skipped_docs += 1
+                    continue
+
+                # Remove old chunks for this file_path (changed/new or re_index)
+                delete_query = sql_text("""
+                    DELETE FROM generic_knowledge
+                    WHERE metadata->>'file_path' = :file_path
+                """)
+                knowledge_store.db_session.execute(delete_query, {"file_path": metadata["file_path"]})
+                knowledge_store.db_session.commit()
+
+                text = pdf_processor.clean_text(text)
+                text_chunks = pdf_processor.chunk_text(text, overlap=DEFAULT_CHUNK_OVERLAP)
+
+                chunks: List[GenericChunk] = []
+                for idx, chunk_text in enumerate(text_chunks):
+                    chunk_metadata = {
+                        **metadata,
+                        "chunk_index": idx,
+                        "total_chunks": len(text_chunks),
+                    }
+                    chunks.append(
+                        GenericChunk(
+                            content=chunk_text,
+                            doc_category=doc_category,
+                            chunk_index=idx,
+                            metadata=chunk_metadata,
+                        )
+                    )
+
+                added_count = knowledge_store.add_chunks(chunks)
+                total_chunks += added_count
+                processed_docs += 1
+
+            except Exception as e:
+                print(f"Error processing uploaded PDF {pdf_path}: {e}")
+                skipped_docs += 1
+                continue
+
+        return {
+            "status": "success",
+            "message": f"Successfully synced {processed_docs} uploaded generic PDF document(s)",
+            "documents_processed": processed_docs,
+            "documents_skipped": skipped_docs,
+            "chunks_created": total_chunks,
+        }
+    finally:
+        knowledge_store.close()
+        if cleanup_dir and cleanup_dir.exists():
+            try:
+                shutil.rmtree(cleanup_dir)
+            except Exception:
+                pass
 
 
 @router.post("/property-pdfs", response_model=PropertyPDFSyncResponse)

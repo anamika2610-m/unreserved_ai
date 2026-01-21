@@ -6,7 +6,7 @@ Supports conversation history for context-aware responses.
 # Import config to ensure environment variables are set
 import app.config  # noqa: F401
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -279,42 +279,55 @@ class ConversationHistoryResponse(BaseModel):
 
 
 @router.get(
-    "/history/{conversation_id}",
+    "/history",
     response_model=ConversationHistoryResponse,
 )
 async def get_conversation_history(
-    conversation_id: UUID,
+    user_id: UUID = Query(..., description="User ID (UUID)"),
+    listing_id: UUID = Query(..., description="Listing ID (UUID)"),
     db: Session = Depends(get_db),
-    limit: Optional[int] = None,
 ) -> ConversationHistoryResponse:
     """
-    Get conversation history for a specific conversation.
-    
-    Returns all messages in chronological order.
+    Get conversation history for a user and listing.
+
+    Returns up to 40 messages in chronological order.
+    Uses query parameters: ?user_id=<uuid>&listing_id=<uuid>
     """
     try:
         conversation_repo = ConversationRepository(db)
-        
-        # Get all messages for this conversation
+
+        conversations = conversation_repo.get_user_conversations(
+            user_id=user_id,
+            listing_id=listing_id,
+            active_only=True,
+        )
+
+        if not conversations:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No conversation found for user_id={user_id} and listing_id={listing_id}",
+            )
+
+        conversation = conversations[0]
+
         messages = conversation_repo.get_conversation_messages(
-            conversation_id=conversation_id,
-            limit=limit,
+            conversation_id=conversation.id,
+            limit=40,
             include_metadata=True,
         )
-        
+
         return ConversationHistoryResponse(
-            conversation_id=str(conversation_id),
+            conversation_id=str(conversation.id),
             messages=messages,
             total_messages=len(messages),
         )
-    
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error retrieving conversation history: {str(e)}"
+            detail=f"Error retrieving conversation history: {str(e)}",
         )
-
-
-
 
 
