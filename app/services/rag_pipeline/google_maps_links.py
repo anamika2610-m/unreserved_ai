@@ -96,7 +96,8 @@ STOP_WORDS = {
 # Generic amenity terms that should NOT be used as search terms
 # These trigger fallback to predefined amenities instead
 GENERIC_AMENITY_TERMS = {
-    'amenity', 'amenities', 'places', 'facilities', 'services', 'location', 'locations'
+    'amenity', 'amenities', 'amenities.', 'places', 'facilities', 'services', 
+    'location', 'locations', 'area', 'nearby', 'things', 'stuff', 'options'
 }
 
 # Common amenities for default suggestions
@@ -251,6 +252,21 @@ def is_amenity_query(query: str) -> bool:
     if any(term in query_lower for term in market_data_terms):
         return False
     
+    # Exclude generic knowledge/regulatory queries (bushfire regulations, planning regulations, etc.)
+    # These are about laws/regulations, not physical amenities
+    regulatory_terms = [
+        'bushfire', 'bushfire regulations', 'bushfire management', 'bushfire overlay',
+        'zoning regulations', 'planning regulations', 'heritage overlay',
+        'planning scheme', 'council regulations', 'building regulations',
+        'planning permit', 'planning approval', 'council approval',
+        'regulations', 'regulation', 'legislation', 'legislative',
+        'compliance', 'legal requirements', 'statutory'
+    ]
+    
+    # If query is about regulations/legislation, it's NOT an amenity query
+    if any(term in query_lower for term in regulatory_terms):
+        return False
+    
     # Check for location and amenity context
     has_location_context = any(indicator in query_lower for indicator in LOCATION_INDICATORS)
     has_amenity_context = any(indicator in query_lower for indicator in AMENITY_INDICATORS)
@@ -320,6 +336,16 @@ def extract_amenity_search_terms(query: str) -> List[str]:
     # Remove question marks, apostrophes, and extra spaces
     cleaned = query_lower.replace('?', ' ').replace("'", ' ').strip()
     
+    # Normalize "the nearby" -> "nearby" (common pattern that causes issues)
+    cleaned = re.sub(r'\bthe\s+nearby\b', 'nearby', cleaned)
+    cleaned = re.sub(r'\bnearby\s+the\b', 'nearby', cleaned)
+    # Fix concatenated words like "thenearby" -> "the nearby" -> "nearby"
+    cleaned = re.sub(r'\bthenearby\b', 'nearby', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\bnearbythe\b', 'nearby', cleaned, flags=re.IGNORECASE)
+    
+    # Normalize multiple spaces
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    
     # Split by common separators (and, or, commas)
     terms = re.split(r'\s+and\s+|\s+or\s+|,\s*', cleaned)
     
@@ -333,16 +359,31 @@ def extract_amenity_search_terms(query: str) -> List[str]:
             search_term = ' '.join(filtered_words)
             # Skip if the search term is only generic amenity terms (amenities, places, etc.)
             # These should trigger fallback to predefined amenities instead
-            search_term_lower = search_term.lower()
+            search_term_lower = search_term.lower().rstrip('.')  # Remove trailing period
+            
+            # Check if the entire search term is a generic term (exact match)
+            if search_term_lower in GENERIC_AMENITY_TERMS:
+                print(f"   ⚠️  Skipping generic term: '{search_term}'")
+                continue  # Skip exact generic terms
+            
             if any(generic_term in search_term_lower for generic_term in GENERIC_AMENITY_TERMS):
                 # If the term contains ONLY generic words, skip it
                 words_in_term = search_term_lower.split()
                 if all(word in GENERIC_AMENITY_TERMS for word in words_in_term):
+                    print(f"   ⚠️  Skipping generic-only term: '{search_term}'")
                     continue  # Skip generic-only terms
             
             # Validation - should be 1-3 words and at least 3 characters total
             if 1 <= len(filtered_words) <= 3 and len(search_term) >= 3:
                 search_terms.append(search_term)
+            else:
+                print(f"   ⚠️  Skipping invalid term (length): '{search_term}'")
+    
+    # Final check: if all extracted terms are generic, return empty list (no links)
+    if search_terms:
+        print(f"✅ Extracted {len(search_terms)} search terms: {search_terms}")
+    else:
+        print(f"⚠️  No valid search terms extracted (query too generic)")
     
     return search_terms
 

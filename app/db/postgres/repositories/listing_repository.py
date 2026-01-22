@@ -127,6 +127,14 @@ class ListingRepository:
             pa.land_area as "landArea",
             pa.floor_area as "floorArea",
             pa.year_built as "yearBuilt",
+            pa.zoning,
+            pa.garages,
+            pa.ensuites,
+            pa.car_ports as "carPorts",
+            pa.open_parking_spaces as "openParkingSpace",
+            pa.highlights,
+            pa.energy_rating as "energyRating",
+            pa.frontage,
             
             -- Property type
             pt.name as "propertyTypeName",
@@ -145,7 +153,7 @@ class ListingRepository:
             
         FROM listings l
         LEFT JOIN properties p ON l.property_id = p.id
-        LEFT JOIN property_attributes pa ON p.id = pa.property_id
+        LEFT JOIN property_attributes pa ON l.property_attribute_id = pa.id
         LEFT JOIN property_types pt ON p.property_type_id = pt.id
         LEFT JOIN locations loc ON p.location_id = loc.id
         

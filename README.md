@@ -221,13 +221,17 @@ GET /api/v1/chat/history?user_id=22c91760-ac98-4d05-b545-cdb5a7a8d23f&listing_id
   "conversation_id": "6a57903b-0e5d-4b60-8d50-0df627693943",
   "messages": [
     {
+      "message_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
       "role": "user",
       "content": "What is the price?",
+      "created_at": "2026-01-22T10:30:00.000000",
       "metadata": {...}
     },
     {
+      "message_id": "8b91d825-6729-4a73-a4fc-7d142e77bfa1",
       "role": "bot",
       "content": "The asking price is $399,000...",
+      "created_at": "2026-01-22T10:30:01.500000",
       "metadata": {...}
     }
   ],

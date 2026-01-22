@@ -274,7 +274,10 @@ class ConversationHistoryResponse(BaseModel):
     """Response model for conversation history."""
     
     conversation_id: str = Field(..., description="Conversation ID")
-    messages: List[Dict[str, Any]] = Field(..., description="List of messages in chronological order")
+    messages: List[Dict[str, Any]] = Field(
+        ..., 
+        description="List of messages in chronological order. Each message includes: message_id (UUID), role, content, created_at (ISO format), and optionally metadata."
+    )
     total_messages: int = Field(..., description="Total number of messages in conversation")
 
 

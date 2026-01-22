@@ -43,7 +43,8 @@ NEGOTIATION_KEYWORDS = [
 STRONG_GENERIC_KEYWORDS = [
     'sale of land act', 'estate agents act', 'section 32 statement', 'vendor statement',
     'cooling off', 'underquoting', 'trust account', 'licensing', 'aml',
-    'anti-money laundering', 'how do i become', 'license do i need',
+    'anti-money laundering', 'aml requirements', 'aml requirement', 'aml laws',
+    'how do i become', 'license do i need',
     'statement of information', 'what license', 'which license',
     'estate agents act', 'property law act', 'conveyancing act'
 ]
@@ -221,9 +222,10 @@ class ResponseGenerator:
         print(f"🔍 Query detection: query_source_detected={query_source_detected}, is_strong_generic={is_strong_generic}, listing_id={listing_id}")
         
         # 3️⃣ CASCADING FALLBACK LOGIC
-        # Priority 1: If it's a STRONG generic query (legal/process), skip property data entirely
-        if is_strong_generic:
-            print(f"🔍 Step 1: Generic query detected → trying generic knowledge store first")
+        # Priority 1: If query is detected as generic (legal/process), go to generic knowledge first
+        # This includes both strong generic keywords AND queries routed to generic by detect_query_source
+        if is_strong_generic or query_source_detected == 'generic':
+            print(f"🔍 Step 1: Generic query detected (is_strong_generic={is_strong_generic}, query_source={query_source_detected}) → trying generic knowledge store first")
             generic_context, generic_data_sources, _ = self.augmenter.augment_query(
                 query=query,
                 listing_id=None,
@@ -297,18 +299,121 @@ class ResponseGenerator:
                     print(f"           → No property JSON chunks found")
                     insufficiency_reason = "No property JSON chunks found"
                 
-                if property_sufficient and property_json_data_sources:
-                    print(f"✅ Step 1/4: Property JSON chunks sufficient → using JSON data")
-                    context = property_json_context
-                    data_sources = property_json_data_sources
-                    location_context = property_location_context
-                    query_source = 'property'
+                # 🚨 CRITICAL: Check if this is a "document query" (aerial view, bushfire, flood, etc.)
+                # For document queries, if JSON is insufficient, SKIP JSON and use ONLY property PDFs
+                query_lower = query.lower()
+                document_query_keywords = [
+                    'aerial view', 'aerial', 'bird eye', 'bird\'s eye',
+                    'bushfire', 'flood', 'erosion', 'heritage overlay',
+                    'planning overlay', 'environmental', 'disclosure',
+                    'vendor statement', 'section 32', 'contract'
+                ]
+                is_document_query = any(kw in query_lower for kw in document_query_keywords)
+                
+                # 🚨 CRITICAL: ALWAYS keep JSON data if it exists (especially pricing)
+                # JSON data from backend should NEVER be overridden by PDFs
+                # EXCEPTION: For document queries where JSON is insufficient, skip JSON and use ONLY PDFs
+                if property_json_data_sources:
+                    # If it's a document query AND JSON is insufficient → Skip JSON, use ONLY property PDFs
+                    if is_document_query and not property_sufficient:
+                        print(f"⚠️  Step 1/4: JSON chunks found but INSUFFICIENT for document query")
+                        print(f"           → Reason: {insufficiency_reason}")
+                        print(f"🔍 Step 2/4: Skipping JSON → Trying ONLY property-specific PDFs (document query)")
+                        
+                        property_pdf_context, property_pdf_data_sources, property_location_context = self.augmenter.augment_query_pdf_chunks(
+                            query=query,
+                            listing_id=listing_id,
+                            n_results=n_retrieval_results
+                        )
+                        
+                        # Check if property PDF data is sufficient
+                        if property_pdf_data_sources:
+                            property_sufficient, insufficiency_reason = self.augmenter.check_data_sufficiency(
+                                query=query,
+                                retrieved_context=property_pdf_context,
+                                data_sources=property_pdf_data_sources
+                            )
+                            print(f"           → Found {len(property_pdf_data_sources)} PDF chunks")
+                            top_similarity = property_pdf_data_sources[0].similarity_score if property_pdf_data_sources[0].similarity_score is not None else 0.0
+                            print(f"           → Top similarity: {top_similarity:.4f}")
+                            print(f"           → Sufficient: {property_sufficient}")
+                            
+                            if property_sufficient:
+                                print(f"✅ Step 2/4: Using ONLY property PDFs (JSON skipped for document query)")
+                                context = property_pdf_context  # Use ONLY PDFs, not JSON
+                                data_sources = property_pdf_data_sources
+                                location_context = property_location_context
+                                query_source = 'property'
+                            else:
+                                print(f"⚠️  Step 2/4: Property PDF chunks insufficient")
+                                print(f"           → Reason: {insufficiency_reason}")
+                                # Will fall through to generic or escalation
+                                context = ""
+                                data_sources = []
+                                location_context = None
+                        else:
+                            print(f"           → No property PDF chunks found")
+                            # Will fall through to generic or escalation
+                            context = ""
+                            data_sources = []
+                            location_context = None
+                    else:
+                        # Normal case: Use JSON as primary source
+                        print(f"✅ Step 1/4: Property JSON chunks found → using JSON data as PRIMARY source")
+                        context = property_json_context
+                        data_sources = property_json_data_sources
+                        location_context = property_location_context
+                        query_source = 'property'
+                        
+                        # If JSON data is insufficient, SUPPLEMENT (not replace) with PDF data
+                        # BUT: Check if JSON context already contains the answer before supplementing
+                        json_context_lower = property_json_context.lower()
+                        
+                        # Check if JSON context already answers the query
+                        # For specific attribute queries (zoning, energy rating, etc.), if JSON has it, don't supplement
+                        backend_attribute_keywords = [
+                            'zoning', 'energy rating', 'frontage', 'car port', 'open parking', 
+                            'ensuite', 'year built', 'highlights', 'garage', 'car ports',
+                            'land area', 'floor area', 'land', 'bedroom', 'bathroom', 'garages',
+                            'ensuites', 'frontage', 'year built', 'energy'
+                        ]
+                        query_has_backend_attribute = any(kw in query_lower for kw in backend_attribute_keywords)
+                        # Check if JSON context contains the same keywords that are in the query
+                        json_has_answer = False
+                        if query_has_backend_attribute:
+                            matching_keywords = [kw for kw in backend_attribute_keywords if kw in query_lower]
+                            json_has_answer = any(kw in json_context_lower for kw in matching_keywords)
+                        
+                        if not property_sufficient and not (query_has_backend_attribute and json_has_answer):
+                            print(f"⚠️  Step 1/4: JSON data found but may be insufficient for full answer")
+                            print(f"           → Reason: {insufficiency_reason}")
+                            print(f"🔍 Step 2/4: Trying property-specific PDFs to SUPPLEMENT JSON data")
+                            
+                            property_pdf_context, property_pdf_data_sources, _ = self.augmenter.augment_query_pdf_chunks(
+                                query=query,
+                                listing_id=listing_id,
+                                n_results=n_retrieval_results
+                            )
+                            
+                            if property_pdf_data_sources:
+                                print(f"           → Found {len(property_pdf_data_sources)} PDF chunks to supplement")
+                                # SUPPLEMENT JSON context with PDF context (not replace)
+                                context = property_json_context + "\n\n" + property_pdf_context
+                                # Add PDF sources AFTER JSON sources (JSON has priority)
+                                data_sources = property_json_data_sources + property_pdf_data_sources
+                                print(f"✅ Step 2/4: Combined JSON + PDF data (JSON takes priority)")
+                                property_sufficient = True  # Combined data should be sufficient
+                            else:
+                                print(f"           → No property PDF chunks found to supplement")
+                        elif query_has_backend_attribute and json_has_answer:
+                            print(f"✅ Step 1/4: JSON data contains answer for backend attribute query - NOT supplementing with PDFs")
+                            # Use JSON data only - don't supplement with PDFs
                 else:
-                    print(f"⚠️  Step 1/4: Property JSON chunks insufficient")
+                    print(f"⚠️  Step 1/4: No Property JSON chunks found")
                     print(f"           → Reason: {insufficiency_reason}")
                     
-                    # Step 2/4: Try property-specific PDFs (property_document chunks)
-                    print(f"🔍 Step 2/4: Trying property-specific PDFs (property_document chunks)")
+                    # Step 2/4: Try property-specific PDFs (only if NO JSON data exists)
+                    print(f"🔍 Step 2/4: No JSON data → Trying property-specific PDFs (property_document chunks)")
                     property_pdf_context, property_pdf_data_sources, property_location_context = self.augmenter.augment_query_pdf_chunks(
                         query=query,
                         listing_id=listing_id,
@@ -395,10 +500,17 @@ class ResponseGenerator:
                     )
             
             # If we reach here, we have sufficient data (from one of the steps)
-            if property_sufficient:
+            # NOTE: This section is now mostly redundant as we handle context/data_sources
+            # assignment in the steps above, but keeping for safety
+            if property_sufficient and not context:
                 if property_json_data_sources:
+                    # JSON data always has priority
                     context = property_json_context
                     data_sources = property_json_data_sources
+                    # Supplement with PDF if available
+                    if property_pdf_data_sources:
+                        context = context + "\n\n" + property_pdf_context
+                        data_sources = data_sources + property_pdf_data_sources
                 elif property_pdf_data_sources:
                     context = property_pdf_context
                     data_sources = property_pdf_data_sources
@@ -500,8 +612,9 @@ class ResponseGenerator:
         # 5️⃣ Check if this is an amenity query (to pass has_amenity_links flag)
         # We need to check this BEFORE creating the prompt so the LLM knows to mention the link
         # IMPORTANT: For pure pricing questions, we do NOT want amenity links at all.
+        # IMPORTANT: For generic knowledge queries, we do NOT want amenity links at all.
         has_amenity_links_flag = False
-        if enquiry_type != "price" and is_amenity_query(query):
+        if query_source != 'generic' and enquiry_type != "price" and is_amenity_query(query):
             # Try to get location from location_context first
             latitude = None
             longitude = None
@@ -541,7 +654,34 @@ class ResponseGenerator:
                 has_amenity_links_flag = True
                 print(f"🗺️  Amenity query detected - will generate links and include reference in response")
         
+        # 5.5️⃣ Generate amenity links BEFORE prompt creation (so we can include them in the prompt)
+        pre_generated_amenity_links = []
+        if has_amenity_links_flag and latitude and longitude:
+            print(f"🗺️  Pre-generating amenity links for prompt (lat: {latitude}, lng: {longitude})")
+            amenity_links_result = generate_context_aware_links(
+                query=query,
+                latitude=latitude,
+                longitude=longitude,
+                include_common=True
+            )
+            relevant = amenity_links_result.get('relevant_links', [])
+            suggested = amenity_links_result.get('suggested_links', [])
+            # Use relevant links if available, otherwise use suggested links
+            pre_generated_amenity_links = relevant if relevant else suggested
+            print(f"   → Pre-generated {len(pre_generated_amenity_links)} links for prompt")
+        
         # 6️⃣ Prompt creation
+        # DEBUG: Log context before prompt creation
+        print(f"\n🔍 DEBUG: Before LLM call:")
+        print(f"   Query: '{query}'")
+        print(f"   Query source: {query_source}")
+        print(f"   Context length: {len(context) if context else 0} chars")
+        print(f"   Data sources count: {len(data_sources) if data_sources else 0}")
+        if context:
+            print(f"   Context preview (first 500 chars): {context[:500]}...")
+        else:
+            print(f"   ⚠️  WARNING: Context is EMPTY!")
+        
         # Use different system prompts and user prompts for generic vs property queries
         if query_source == 'generic':
             from app.services.rag_pipeline.prompts import create_generic_user_prompt
@@ -552,7 +692,16 @@ class ResponseGenerator:
             if enquiry_type == "bidding":
                 user_prompt = create_bid_advice_prompt(query, context, conversation_history=conversation_history)
             else:
-                user_prompt = create_user_prompt(query, context, has_amenity_links=has_amenity_links_flag, conversation_history=conversation_history)
+                user_prompt = create_user_prompt(
+                    query, 
+                    context, 
+                    has_amenity_links=has_amenity_links_flag, 
+                    amenity_links_list=pre_generated_amenity_links if has_amenity_links_flag else None,
+                    conversation_history=conversation_history
+                )
+        
+        print(f"   User prompt length: {len(user_prompt)} chars")
+        print(f"   User prompt preview (first 500 chars): {user_prompt[:500]}...")
 
         messages = [{"role": "system", "content": system_prompt}]
         messages.append({"role": "user", "content": user_prompt})
@@ -703,69 +852,9 @@ class ResponseGenerator:
         ai_response = response_dict["ai_response"]
         log_entry = response_dict["log_entry"]
 
-        # 9️⃣ Generate amenity links if it's an amenity query
-        # IMPORTANT: Always generate links for amenity queries when listing_id is present,
-        # regardless of where the answer came from (property PDFs, generic knowledge, etc.)
-        # BUT: For pure pricing questions (enquiry_type == "price"), skip amenity links entirely.
-        amenity_links = []
-        is_amenity = is_amenity_query(query)
-        print(f"🔍 Query: '{query}'")
-        print(f"🔍 Is amenity query? {is_amenity} (enquiry_type={enquiry_type})")
-        if is_amenity and listing_id and enquiry_type != "price":
-            # Get latitude/longitude from location_context first
-            latitude = None
-            longitude = None
-            
-            if location_context:
-                latitude = location_context.get('latitude')
-                longitude = location_context.get('longitude')
-            
-            # Fallback: If location_context is None or missing lat/lng, fetch from database
-            if (latitude is None or longitude is None) and listing_id:
-                print(f"🗺️  Location not in context, fetching from database for listing_id: {listing_id}")
-                try:
-                    from app.db.postgres.repositories.listing_repository import ListingRepository
-                    from app.db.session import SessionLocal
-                    
-                    db_session = SessionLocal()
-                    try:
-                        listing_repo = ListingRepository(db_session)
-                        location_data = listing_repo.get_listing_location(listing_id)
-                        
-                        if location_data:
-                            latitude = location_data.get('latitude')
-                            longitude = location_data.get('longitude')
-                            print(f"   → Fetched location from DB: lat={latitude}, lng={longitude}")
-                            
-                            # Update location_context for future use
-                            if location_context is None:
-                                location_context = {}
-                            location_context['latitude'] = latitude
-                            location_context['longitude'] = longitude
-                    finally:
-                        db_session.close()
-                except Exception as e:
-                    print(f"⚠️  Failed to fetch location from database: {type(e).__name__}: {e}")
-            
-            if latitude and longitude:
-                print(f"🗺️  Generating amenity links (lat: {latitude}, lng: {longitude})")
-                amenity_links = generate_context_aware_links(
-                    query=query,
-                    latitude=latitude,
-                    longitude=longitude,
-                    include_common=True
-                )
-                print(f"   → Generated {len(amenity_links.get('relevant_links', []))} relevant links")
-                print(f"   → Generated {len(amenity_links.get('suggested_links', []))} suggested links")
-            else:
-                print(f"⚠️  Cannot generate amenity links: missing latitude/longitude (listing_id: {listing_id})")
-        elif is_amenity_query(query) and not listing_id and enquiry_type != "price":
-            print(f"⚠️  Amenity query detected but no listing_id provided - cannot generate links")
-        else:
-            if not is_amenity:
-                print(f"✅ Not an amenity query - skipping amenity link generation")
-            elif not listing_id:
-                print(f"⚠️  No listing_id provided - skipping amenity link generation")
+        # 9️⃣ Use pre-generated amenity links (already generated before prompt creation)
+        # Links were already generated in step 5.5 and included in the LLM prompt
+        final_amenity_links = pre_generated_amenity_links if has_amenity_links_flag else []
 
         # 🔟 Extract nearby properties from location_context
         # ONLY include nearby properties if the user explicitly asked about them
@@ -781,14 +870,6 @@ class ResponseGenerator:
                     print(f"🏘️  User asked about nearby properties - including {len(nearby_properties_json)} properties in response")
             else:
                 print(f"✅ User did not ask about nearby properties - excluding from response (query_type: {query_type})")
-        
-        # Combine relevant and suggested links (suggested only if no relevant)
-        final_amenity_links = []
-        if amenity_links:
-            relevant = amenity_links.get('relevant_links', [])
-            suggested = amenity_links.get('suggested_links', [])
-            # Use relevant links if available, otherwise use suggested links
-            final_amenity_links = relevant if relevant else suggested
         
         return {
             "ai_response": ai_response,

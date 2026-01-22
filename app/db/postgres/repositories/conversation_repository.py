@@ -146,13 +146,15 @@ class ConversationRepository(BaseRepository[Conversation]):
         Args:
             msg: ChatMessage instance
             include_metadata: Whether to include metadata
-            
+        
         Returns:
             Formatted message dictionary
         """
         item = {
+            "message_id": str(msg.id),  # Include message ID
             "role": msg.role.value,  # enum → string
             "content": msg.content,
+            "created_at": msg.created_at.isoformat() if msg.created_at else None,
         }
         if include_metadata and msg.meta_data:
             item["metadata"] = msg.meta_data
@@ -168,28 +170,40 @@ class ConversationRepository(BaseRepository[Conversation]):
         include_metadata: bool = False,
     ) -> List[Dict[str, Any]]:
         """
-        Get all messages for a conversation, formatted for LLM context.
+        Get messages for a conversation, formatted for LLM context.
+        
+        If limit is specified, returns the LATEST N messages in chronological order.
+        Otherwise returns all messages in chronological order.
         
         Args:
             conversation_id: Conversation ID
-            limit: Optional limit on number of messages
+            limit: Optional limit on number of messages (returns LATEST N if specified)
             include_metadata: Whether to include message metadata
             
         Returns:
-            List of formatted message dictionaries
+            List of formatted message dictionaries in chronological order
         """
         with self._handle_errors():
-            query = (
-                select(ChatMessage)
-                .where(ChatMessage.conversation_id == conversation_id)
-                .order_by(ChatMessage.created_at)
-            )
-
             if limit:
-                query = query.limit(limit)
-
-            result = self.session.execute(query)
-            messages = result.scalars().all()
+                # Get LATEST N messages: order by created_at DESC, limit, then reverse
+                query = (
+                    select(ChatMessage)
+                    .where(ChatMessage.conversation_id == conversation_id)
+                    .order_by(desc(ChatMessage.created_at))
+                    .limit(limit)
+                )
+                result = self.session.execute(query)
+                messages = list(result.scalars().all())
+                messages.reverse()  # Reverse to get chronological order (oldest to newest)
+            else:
+                # Get ALL messages in chronological order
+                query = (
+                    select(ChatMessage)
+                    .where(ChatMessage.conversation_id == conversation_id)
+                    .order_by(ChatMessage.created_at)
+                )
+                result = self.session.execute(query)
+                messages = result.scalars().all()
 
             return [
                 self._format_message(msg, include_metadata)

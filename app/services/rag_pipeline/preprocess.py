@@ -332,6 +332,13 @@ def detect_query_source(query: str, conversation_history: Optional[List[Dict[str
         'agent violations', 'unprofessional conduct', 'agents disciplined',
         'aml requirements', 'verify buyer identity', 'aml laws',
         
+        # Planning & Regulations (ONLY if no listing_id - generic knowledge)
+        # Note: If listing_id is present, these should search property_document PDFs first
+        # 'bushfire', 'bushfire regulations', 'bushfire management', 'bushfire overlay',  # Removed - now handled by DOCUMENT_KEYWORDS
+        # 'zoning regulations', 'planning regulations', 'heritage overlay',  # Removed - now handled by DOCUMENT_KEYWORDS
+        'planning scheme', 'council regulations', 'building regulations',
+        'planning permit', 'planning approval', 'council approval',
+        
         # Meta-conversation (requires conversation_id)
         'what did i ask', 'what was my last question', 'what did we discuss',
         'previous question', 'earlier question', 'last question',
@@ -386,7 +393,11 @@ def detect_query_source(query: str, conversation_history: Optional[List[Dict[str
         'bedroom', 'bathroom', 'square', 'sqft', 'acre', 'hectare', 'inspection',
         'auction', 'sale', 'asking', 'offer', 'bid', 'vendor', 'agent', 'address',
         'street', 'suburb', 'postcode', 'land size', 'building size', 'car space',
-        'parking', 'garage', 'pool', 'garden', 'view', 'floor plan', 'photos'
+        'parking', 'garage', 'pool', 'garden', 'view', 'floor plan', 'photos',
+        # Amenity-related keywords (for "nearby schools", "nearby hospitals", etc.)
+        'schools', 'school', 'hospital', 'hospitals', 'supermarket', 'supermarkets',
+        'transport', 'bus', 'train', 'tram', 'station', 'nearby', 'close to',
+        'walking distance', 'parks', 'shopping', 'restaurants', 'cafes'
     ]
     has_property_keywords = any(kw in query_lower for kw in property_keywords)
     

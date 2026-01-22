@@ -45,7 +45,16 @@ class PropertyRetriever:
         'information provided', 'details provided', 'what information',
         'what details', 'document', 'documents', 'statement', 'report',
         'disclosure', 'vendor statement', 'section 32', 'contract',
-        'market', 'knowledge base', 'property knowledge', 'property information'
+        'market', 'knowledge base', 'property knowledge', 'property information',
+        # Property-specific environmental/planning queries (should search property_document PDFs)
+        'bushfire', 'bushfire regulations', 'bushfire management', 'bushfire overlay',
+        'flood', 'flooding', 'flood regulations', 'flood overlay', 'flood risk',
+        # Views/aerial information (often in property PDFs)
+        'aerial view', 'aerial', 'bird eye view', 'bird\'s eye', 'birds eye',
+        'view', 'views', 'outlook', 'aspect', 'vantage',
+        'erosion', 'soil erosion', 'erosion risk', 'coastal erosion',
+        'heritage overlay', 'planning overlay', 'zoning overlay',
+        'environmental', 'environmental risk', 'environmental hazard'
     ]
 
     def __init__(
@@ -330,8 +339,13 @@ class PropertyRetriever:
             target_chunk_types = []
             if is_price_query:
                 target_chunk_types.append('pricing')
-            if is_amenity_query or is_attribute_query:
-                target_chunk_types.extend(['attributes', 'amenities'])
+            if is_amenity_query:
+                # Amenity queries should search both amenities chunk AND property_document PDFs
+                # Property PDFs often contain nearby school/hospital information
+                target_chunk_types.extend(['amenities', 'property_document'])
+            if is_attribute_query:
+                # Attribute queries should search specifications chunk (bedrooms, bathrooms, land area, etc.)
+                target_chunk_types.extend(['specifications', 'overview'])
             if is_document_query:
                 target_chunk_types.append('property_document')
             
@@ -347,11 +361,14 @@ class PropertyRetriever:
                         results.append(r)
                         seen_ids.add(r['id'])
             
+            # Additional fill-up search: EXCLUDE property_document chunks to prioritize backend JSON data
+            # This ensures PDF data doesn't override backend pricing/specifications
             if len(results) < n_results:
                 additional = self.vector_store.search(
                     query=query,
                     n_results=n_results - len(results),
-                    filter_metadata={'listing_id': listing_id}
+                    listing_id=listing_id,
+                    chunk_types=['overview', 'pricing', 'specifications', 'location', 'attributes', 'amenities']  # Exclude property_document
                 )
                 for r in additional:
                     if r['id'] not in seen_ids:
@@ -363,6 +380,21 @@ class PropertyRetriever:
         if is_price_query and not is_multi_topic:
             allow_hybrid = False
             chunk_types = ['pricing']
+        
+        # For attribute queries (land area, bedrooms, etc.), explicitly search specifications chunk
+        # Also use hybrid mode to ensure we get the specifications chunk even if similarity is low
+        if is_attribute_query and not is_multi_topic and not is_price_query:
+            chunk_types = ['specifications', 'overview']  # Specifications has detailed attributes, overview has summary
+            allow_hybrid = True  # Ensure we get all chunks for this listing, then rerank
+        
+        # For amenity queries, search both amenities chunk AND property_document PDFs
+        # Property PDFs often contain nearby school/hospital information
+        if is_amenity_query and not is_multi_topic and not is_price_query and listing_id:
+            print(f"🏫 Amenity query detected (single-topic, not price)")
+            print(f"   Setting chunk_types=['amenities', 'property_document', 'overview']")
+            print(f"   allow_hybrid=True")
+            chunk_types = ['amenities', 'property_document', 'overview']  # Include property_document for school/hospital info
+            allow_hybrid = True  # Ensure we get all chunks for this listing, then rerank
         
         # For document queries, explicitly include property_document chunks
         if is_document_query and not is_multi_topic and listing_id:
@@ -407,11 +439,27 @@ class PropertyRetriever:
         if chunk_types and len(chunk_types) == 1:
             filters['chunk_type'] = chunk_types[0]
 
+        # Pass chunk_types directly to search (supports multiple types)
+        print(f"🔍 Calling vector_store.search with:")
+        print(f"   query='{query}'")
+        print(f"   n_results={n_results}")
+        print(f"   listing_id={listing_id}")
+        print(f"   chunk_types={chunk_types}")
+        print(f"   allow_hybrid={allow_hybrid}")
+        
         results = self.vector_store.search(
             query=query,
             n_results=n_results,
+            listing_id=listing_id,
+            chunk_types=chunk_types if chunk_types else None,
             filter_metadata=filters if filters else None
         )
+        
+        print(f"✅ vector_store.search returned {len(results)} results:")
+        for i, r in enumerate(results[:5]):  # Show first 5
+            print(f"   [{i+1}] chunk_type={r.get('chunk_type', 'unknown')}, "
+                  f"similarity={r.get('similarity', 0):.3f}, "
+                  f"listing_id={r.get('listing_id', 'N/A')}")
 
         
         if allow_hybrid and listing_id:
@@ -419,8 +467,14 @@ class PropertyRetriever:
 
             seen_ids = {r['id'] for r in results}
             for chunk in listing_chunks:
+                # Filter by chunk_type if specified
+                if chunk_types:
+                    chunk_type = chunk.get('metadata', {}).get('chunk_type') or chunk.get('chunk_type')
+                    if chunk_type not in chunk_types:
+                        continue
                 if chunk['id'] not in seen_ids:
                     results.append(chunk)
+                    seen_ids.add(chunk['id'])
 
         return self._rerank(results, query)[:n_results]
 
