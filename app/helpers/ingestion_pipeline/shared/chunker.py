@@ -310,6 +310,10 @@ class PropertyListingChunker:
         if specs:
             parts.append(f"\nKey Features: {', '.join(specs)}")
         
+        # Zoning (important planning information)
+        if listing.get('zoning'):
+            parts.append(f"\nZoning: {listing.get('zoning')}")
+        
         # Highlights
         highlights = listing.get('highlights', [])
         if highlights:
@@ -385,6 +389,12 @@ class PropertyListingChunker:
         garages = listing.get('garages')
         if garages is not None:  # 0 is a valid value, so check for None explicitly
             parts.append(f"Garages: {garages}")
+        car_ports = listing.get('carPorts')
+        if car_ports is not None:  # 0 is a valid value, so check for None explicitly
+            parts.append(f"Car Ports: {car_ports}")
+        open_parking = listing.get('openParkingSpace')
+        if open_parking is not None:  # 0 is a valid value, so check for None explicitly
+            parts.append(f"Open Parking Spaces: {open_parking}")
         
         # Areas
         if listing.get('floorArea'):
