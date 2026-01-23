@@ -273,9 +273,32 @@ class ResponseGenerator:
             property_location_context = None
             property_sufficient = False
             insufficiency_reason = ""
+            display_price = True  # Initialize at function scope level
             
             # Step 1/4: Try property JSON chunks (excludes property_document)
             if listing_id:
+                # 🚨 PRICE VISIBILITY CHECK: Fetch displayPrice from database
+                display_price = True  # Default to True if we can't fetch
+                try:
+                    from app.db.postgres.repositories.listing_repository import ListingRepository
+                    from app.db.session import SessionLocal
+                    
+                    db_session = SessionLocal()
+                    try:
+                        listing_repo = ListingRepository(db_session)
+                        listing_data = listing_repo._execute_query_one(
+                            "SELECT display_price FROM listings WHERE id = :listing_id",
+                            {"listing_id": listing_id}
+                        )
+                        if listing_data:
+                            display_price = listing_data.get('display_price', True)
+                            print(f"🔒 Price visibility check: displayPrice = {display_price} for listing {listing_id}")
+                    finally:
+                        db_session.close()
+                except Exception as e:
+                    print(f"⚠️  Failed to fetch displayPrice from database: {type(e).__name__}: {e}")
+                    # Default to True (show price) if we can't fetch - safer default
+                
                 print(f"🔍 Step 1/4: Trying property JSON chunks (listing_id: {listing_id})")
                 print(f"           → This includes: overview, pricing, specifications, location chunks (excludes property_document)")
                 property_json_context, property_json_data_sources, property_location_context = self.augmenter.augment_query_json_chunks(
@@ -283,6 +306,27 @@ class ResponseGenerator:
                     listing_id=listing_id,
                     n_results=n_retrieval_results
                 )
+                
+                # 🚨 RETRIEVAL LAYER ENFORCEMENT: Filter out price chunks if displayPrice = false
+                if not display_price and enquiry_type == "price":
+                    # Remove pricing chunks from data sources
+                    original_count = len(property_json_data_sources)
+                    property_json_data_sources = [
+                        ds for ds in property_json_data_sources 
+                        if ds.chunk_type != 'pricing'
+                    ]
+                    filtered_count = original_count - len(property_json_data_sources)
+                    if filtered_count > 0:
+                        print(f"🔒 RETRIEVAL LAYER: Filtered out {filtered_count} pricing chunk(s) (displayPrice = false)")
+                        # Also remove pricing content from context
+                        import re
+                        # Remove pricing sections from context
+                        property_json_context = re.sub(
+                            r'=== PROPERTY LISTING:.*?===\s*\[PRICING\].*?(?=\[|===|$)',
+                            '',
+                            property_json_context,
+                            flags=re.DOTALL
+                        )
                 
                 # Check if property JSON data is sufficient
                 if property_json_data_sources:
@@ -719,6 +763,25 @@ class ResponseGenerator:
                 max_tokens=self.model_config["max_tokens"],
             )
             answer = response.choices[0].message.content.strip()
+            
+            # 🚨 RESPONSE LAYER ENFORCEMENT: Check for price disclosure when displayPrice = false
+            if listing_id and enquiry_type == "price" and not display_price:
+                # Check if answer contains price information (dollar signs, numbers with currency symbols, etc.)
+                import re
+                price_patterns = [
+                    r'\$\s*\d+[,\d]*',  # $500,000 or $500000
+                    r'\d+[,\d]*\s*dollars?',  # 500,000 dollars
+                    r'price[:\s]+\$?\d+',  # Price: $500,000
+                    r'asking\s+price[:\s]+\$?\d+',  # Asking price: $500,000
+                    r'auction\s+start\s+price[:\s]+\$?\d+',  # Auction start price: $500,000
+                    r'highest\s+bid[:\s]+\$?\d+',  # Highest bid: $500,000
+                ]
+                
+                contains_price = any(re.search(pattern, answer, re.IGNORECASE) for pattern in price_patterns)
+                
+                if contains_price:
+                    print(f"🔒 RESPONSE LAYER: Detected price disclosure in answer (displayPrice = false) → replacing with fallback")
+                    answer = "Please contact the vendor / Unreserved for pricing details."
         
         except Exception as e:
             import traceback
