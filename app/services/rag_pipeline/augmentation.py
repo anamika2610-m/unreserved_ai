@@ -132,24 +132,39 @@ class QueryAugmenter:
         
         if listing_id:
             from app.services.rag_pipeline.location_utils import detect_location_query, get_location_from_chunk
-            is_location_query, _ = detect_location_query(query)
+            is_location_query, query_type = detect_location_query(query)
             
             if is_location_query:
-                # For location queries, still exclude property_document chunks for JSON retrieval
-                # We'll get location context but only from JSON chunks
-                standard_results = self.retriever.retrieve(
-                    query=query,
-                    n_results=n_results,
-                    listing_id=listing_id,
-                    chunk_types=['overview', 'pricing', 'specifications', 'location', 'attributes', 'amenities']
-                )
-                # Extract location context from results
-                for result in standard_results:
-                    loc_ctx = get_location_from_chunk(result)
-                    if loc_ctx:
-                        location_context = loc_ctx
-                        break
-                results = standard_results
+                # For nearby_properties queries, use retrieve_with_location_context to fetch nearby properties
+                # For other location queries (amenities, transport), use standard retrieve
+                if query_type == 'nearby_properties':
+                    standard_results, location_context = self.retriever.retrieve_with_location_context(
+                        query=query,
+                        listing_id=listing_id,
+                        n_results=n_results,
+                        max_distance_km=15.0,
+                        max_nearby_properties=5
+                    )
+                    # Filter out property_document chunks from results
+                    results = [
+                        r for r in standard_results
+                        if r.get('chunk_type') != 'property_document' and r.get('metadata', {}).get('chunk_type') != 'property_document'
+                    ][:n_results]
+                else:
+                    # For other location queries (amenities, transport), keep existing behavior
+                    standard_results = self.retriever.retrieve(
+                        query=query,
+                        n_results=n_results,
+                        listing_id=listing_id,
+                        chunk_types=['overview', 'pricing', 'specifications', 'location', 'attributes', 'amenities']
+                    )
+                    # Extract location context from results
+                    for result in standard_results:
+                        loc_ctx = get_location_from_chunk(result)
+                        if loc_ctx:
+                            location_context = loc_ctx
+                            break
+                    results = standard_results
             else:
                 # Standard retrieval - EXCLUDE property_document chunks
                 results = self.retriever.retrieve(
