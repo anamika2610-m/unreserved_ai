@@ -179,27 +179,45 @@ open http://localhost:8000/docs
 
 Send a message to the chatbot.
 
-**Required Fields:**
-- `question` (string): User's question about the property or general real estate query
-- `listing_id` (UUID): Property listing ID - required
-- `user_id` (UUID): User ID - required (no conversation history for non-logged-in users)
-- `conversation_id` (UUID, optional): Existing conversation ID
+**Fields:**
+- `question` (string, **required**): User's question about the property or general real estate query
+- `listing_id` (UUID, **required**): Property listing ID
+- `user_id` (UUID, **optional**): User ID - if not provided, conversation history will NOT be saved (anonymous chat)
+- `conversation_id` (UUID, **optional**): Existing conversation ID
 
-**Request:**
+**Request (with user_id - saves history):**
 ```json
 {
   "question": "What is the price of this property?",
   "listing_id": "950b945a-5604-49a0-9cf9-3d3c16cf9c1a",
-  "user_id": "22c91760-ac98-4d05-b545-cdb5a7a8d23f",
-  "conversation_id": "optional-existing-conversation-id"
+  "user_id": "22c91760-ac98-4d05-b545-cdb5a7a8d23f"
 }
 ```
 
-**Response:**
+**Request (without user_id - anonymous, no history saved):**
+```json
+{
+  "question": "What is the price of this property?",
+  "listing_id": "950b945a-5604-49a0-9cf9-3d3c16cf9c1a"
+}
+```
+
+**Response (with user_id - conversation_id returned):**
 ```json
 {
   "answer": "The asking price for this property is **$399,000**...",
   "conversation_id": "6a57903b-0e5d-4b60-8d50-0df627693943",
+  "nearby_properties": [...],
+  "amenity_links": [...],
+  "timestamp": "2026-01-15T10:30:00"
+}
+```
+
+**Response (without user_id - conversation_id is null):**
+```json
+{
+  "answer": "The asking price for this property is **$399,000**...",
+  "conversation_id": null,
   "nearby_properties": [...],
   "amenity_links": [...],
   "timestamp": "2026-01-15T10:30:00"
