@@ -360,6 +360,30 @@ class ListingRepository:
         """
         return self._execute_query(query, {"property_id": property_id})
     
+    def get_listing_hero_image(self, listing_id: str) -> Optional[str]:
+        """
+        Get the hero image URL (first image by display order) for a listing.
+        
+        Args:
+            listing_id: The listing ID
+            
+        Returns:
+            Image URL string or None if no images found
+        """
+        query = """
+            SELECT mm.file_url as "fileUrl"
+            FROM listings l
+            JOIN properties p ON l.property_id = p.id
+            JOIN property_media pm ON p.id = pm.property_id
+            JOIN media_metadata mm ON pm.file_id = mm.id
+            WHERE l.id = :listing_id
+            AND mm.file_type IN ('jpg', 'jpeg', 'png', 'webp')
+            ORDER BY pm.display_order ASC
+            LIMIT 1
+        """
+        result = self._execute_query_one(query, {"listing_id": listing_id})
+        return result.get("fileUrl") if result else None
+    
     def get_listing_location(self, listing_id: str) -> Optional[Dict[str, Any]]:
         """
         Get location data (latitude, longitude, address, suburb) for a listing.

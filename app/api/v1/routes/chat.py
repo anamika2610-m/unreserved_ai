@@ -190,25 +190,40 @@ async def chat_message(
         amenity_links = result.get("amenity_links", [])
 
         # ----------------------------------------------------------
+        # Fetch hero image URL for the listing (if applicable)
+        # ----------------------------------------------------------
+        image_url = None
+        if listing_id:
+            from app.db.postgres.repositories.listing_repository import ListingRepository
+            listing_repo = ListingRepository(db)
+            image_url = listing_repo.get_listing_hero_image(str(listing_id))
+
+        # ----------------------------------------------------------
         # Store AI response (only if user_id is provided)
         # ----------------------------------------------------------
         if user_id and conversation:
+            metadata = {
+                "listing_id": str(request.listing_id) if request.listing_id else None,
+                "query_type": "generic" if is_generic_query else "property_specific",
+                "needs_vendor_contact": ai_response.needs_vendor_contact,
+                "nearby_properties": nearby_properties,
+                "amenity_links": amenity_links,
+                "data_sources": (
+                    [ds.dict() for ds in ai_response.data_sources]
+                    if ai_response.data_sources
+                    else []
+                ),
+            }
+            
+            # Add imageURL to metadata if it exists
+            if image_url:
+                metadata["imageURL"] = image_url
+            
             conversation_repo.add_message(
                 conversation_id=conversation.id,
                 role=ConversationRole.bot,
                 content=ai_response.answer,
-                metadata={
-                    "listing_id": str(request.listing_id) if request.listing_id else None,
-                    "query_type": "generic" if is_generic_query else "property_specific",
-                    "needs_vendor_contact": ai_response.needs_vendor_contact,
-                    "nearby_properties": nearby_properties,
-                    "amenity_links": amenity_links,
-                    "data_sources": (
-                        [ds.dict() for ds in ai_response.data_sources]
-                        if ai_response.data_sources
-                        else []
-                    ),
-                },
+                metadata=metadata,
             )
 
         # ----------------------------------------------------------

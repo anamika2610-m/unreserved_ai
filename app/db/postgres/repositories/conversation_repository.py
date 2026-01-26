@@ -146,7 +146,7 @@ class ConversationRepository(BaseRepository[Conversation]):
         Args:
             msg: ChatMessage instance
             include_metadata: Whether to include metadata
-        
+            
         Returns:
             Formatted message dictionary
         """
@@ -156,6 +156,11 @@ class ConversationRepository(BaseRepository[Conversation]):
             "content": msg.content,
             "created_at": msg.created_at.isoformat() if msg.created_at else None,
         }
+        
+        # Extract imageURL from metadata as a top-level field (if it exists)
+        if msg.meta_data and "imageURL" in msg.meta_data:
+            item["imageURL"] = msg.meta_data["imageURL"]
+        
         if include_metadata and msg.meta_data:
             item["metadata"] = msg.meta_data
         return item

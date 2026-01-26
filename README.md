@@ -256,6 +256,7 @@ GET /api/v1/chat/history?user_id=22c91760-ac98-4d05-b545-cdb5a7a8d23f&listing_id
       "role": "bot",
       "content": "The asking price is $399,000...",
       "created_at": "2026-01-22T10:30:01.500000",
+      "imageURL": "https://example.com/property-image.jpg",
       "metadata": {...}
     }
   ],
