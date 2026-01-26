@@ -51,8 +51,8 @@ class ChatRequest(BaseModel):
         ..., description="Property listing ID (UUID). Required."
     )
 
-    user_id: Optional[UUID] = Field(
-        None, description="User ID (UUID). Optional, defaults to 'api_user'."
+    user_id: UUID = Field(
+        ..., description="User ID (UUID). Required."
     )
 
     conversation_id: Optional[UUID] = Field(
@@ -99,15 +99,12 @@ async def chat_message(
     """
 
     try:
-        from uuid import uuid5, NAMESPACE_DNS
         from sqlalchemy import text
         
         # ----------------------------------------------------------
-        # Set default values for optional fields
+        # Extract required fields from request
         # ----------------------------------------------------------
-        # Default user_id for anonymous/generic queries
-        user_id = request.user_id or uuid5(NAMESPACE_DNS, "api_user")
-
+        user_id = request.user_id
         listing_id = request.listing_id
         
         conversation_repo = ConversationRepository(db)

@@ -179,6 +179,12 @@ open http://localhost:8000/docs
 
 Send a message to the chatbot.
 
+**Required Fields:**
+- `question` (string): User's question about the property or general real estate query
+- `listing_id` (UUID): Property listing ID - required
+- `user_id` (UUID): User ID - required (no conversation history for non-logged-in users)
+- `conversation_id` (UUID, optional): Existing conversation ID
+
 **Request:**
 ```json
 {

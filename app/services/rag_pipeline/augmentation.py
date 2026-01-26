@@ -138,6 +138,7 @@ class QueryAugmenter:
                 # For nearby_properties queries, use retrieve_with_location_context to fetch nearby properties
                 # For other location queries (amenities, transport), use standard retrieve
                 if query_type == 'nearby_properties':
+                    print(f"🏘️  NEARBY PROPERTIES QUERY DETECTED - calling retrieve_with_location_context")
                     standard_results, location_context = self.retriever.retrieve_with_location_context(
                         query=query,
                         listing_id=listing_id,
@@ -145,6 +146,12 @@ class QueryAugmenter:
                         max_distance_km=15.0,
                         max_nearby_properties=5
                     )
+                    print(f"🏘️  retrieve_with_location_context returned:")
+                    print(f"     - {len(standard_results)} results")
+                    print(f"     - location_context: {location_context is not None}")
+                    if location_context:
+                        nearby = location_context.get('nearby_properties_json', [])
+                        print(f"     - {len(nearby)} nearby properties in location_context")
                     # Filter out property_document chunks from results
                     results = [
                         r for r in standard_results
