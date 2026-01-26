@@ -51,8 +51,8 @@ class ChatRequest(BaseModel):
         ..., description="Property listing ID (UUID). Required."
     )
 
-    user_id: UUID = Field(
-        ..., description="User ID (UUID). Required."
+    user_id: Optional[UUID] = Field(
+        None, description="User ID (UUID). Optional. If not provided, conversation history will not be saved."
     )
 
     conversation_id: Optional[UUID] = Field(
@@ -73,7 +73,7 @@ class ChatResponse(BaseModel):
     """Response model for chat endpoint."""
 
     answer: str = Field(..., description="Bot's response to the user's question")
-    conversation_id: str = Field(..., description="Conversation ID")
+    conversation_id: Optional[str] = Field(None, description="Conversation ID (null for anonymous users)")
     needs_vendor_contact: Optional[bool] = None
     nearby_properties: Optional[List[Dict[str, Any]]] = None
     amenity_links: Optional[List[Dict[str, Any]]] = None
@@ -102,31 +102,53 @@ async def chat_message(
         from sqlalchemy import text
         
         # ----------------------------------------------------------
-        # Extract required fields from request
+        # Extract fields from request
         # ----------------------------------------------------------
         user_id = request.user_id
         listing_id = request.listing_id
         
+        # ----------------------------------------------------------
+        # Conversation history (only if user_id is provided)
+        # ----------------------------------------------------------
+        conversation = None
+        conversation_history = []
         conversation_repo = ConversationRepository(db)
-
-        # ----------------------------------------------------------
-        # Get or create conversation (scoped by user_id + listing_id)
-        # Query may still be generic; routing is decided by text, not listing_id presence.
-        # ----------------------------------------------------------
-        conversation = conversation_repo.get_or_create_conversation(
-            user_id=user_id,
-            listing_id=listing_id,
-            conversation_id=request.conversation_id,
-        )
-
-        # ----------------------------------------------------------
-        # Fetch recent conversation history BEFORE adding new message
-        # This ensures we only get PREVIOUS messages, not the current one
-        # ----------------------------------------------------------
-        conversation_history = conversation_repo.get_recent_messages(
-            conversation_id=conversation.id,
-            n_messages=10,
-        )
+        
+        if user_id:
+            # Logged-in user: Get or create conversation and fetch history
+            conversation = conversation_repo.get_or_create_conversation(
+                user_id=user_id,
+                listing_id=listing_id,
+                conversation_id=request.conversation_id,
+            )
+            
+            conversation_history = conversation_repo.get_recent_messages(
+                conversation_id=conversation.id,
+                n_messages=10,
+            )
+            
+            # Detect query type using conversation history
+            source = detect_query_source(
+                request.question,
+                conversation_history=conversation_history,
+            )
+            is_generic_query = (source == "generic")
+            
+            # Store user message
+            conversation_repo.add_message(
+                conversation_id=conversation.id,
+                role=ConversationRole.user,
+                content=request.question,
+                metadata={
+                    "listing_id": str(request.listing_id) if request.listing_id else None,
+                    "query_type": "generic" if is_generic_query else "property_specific",
+                },
+            )
+        else:
+            # Anonymous user: No conversation history
+            print("🔓 Anonymous user - no conversation history will be saved")
+            source = detect_query_source(request.question, conversation_history=[])
+            is_generic_query = (source == "generic")
 
         enquiry = BuyerEnquiry(
             question=request.question,
@@ -135,29 +157,6 @@ async def chat_message(
         )
 
         enquiry_data = preprocess_enquiry(enquiry)
-
-        # ----------------------------------------------------------
-        # Detect whether the query is GENERIC vs PROPERTY-specific
-        # This uses the text + conversation history, not listing_id.
-        # ----------------------------------------------------------
-        source = detect_query_source(
-            enquiry_data["normalized_query"],
-            conversation_history=conversation_history,
-        )
-        is_generic_query = (source == "generic")
-
-        # ----------------------------------------------------------
-        # Store user message AFTER fetching history & determining query type
-        # ----------------------------------------------------------
-        conversation_repo.add_message(
-            conversation_id=conversation.id,
-            role=ConversationRole.user,
-            content=request.question,
-            metadata={
-                "listing_id": str(request.listing_id) if request.listing_id else None,
-                "query_type": "generic" if is_generic_query else "property_specific",
-            },
-        )
 
         # ----------------------------------------------------------
         # Generate AI response (RAG)
@@ -191,32 +190,33 @@ async def chat_message(
         amenity_links = result.get("amenity_links", [])
 
         # ----------------------------------------------------------
-        # Store AI response
+        # Store AI response (only if user_id is provided)
         # ----------------------------------------------------------
-        conversation_repo.add_message(
-            conversation_id=conversation.id,
-            role=ConversationRole.bot,
-            content=ai_response.answer,
-            metadata={
-                "listing_id": str(request.listing_id) if request.listing_id else None,
-                "query_type": "generic" if is_generic_query else "property_specific",
-                "needs_vendor_contact": ai_response.needs_vendor_contact,
-                "nearby_properties": nearby_properties,
-                "amenity_links": amenity_links,
-                "data_sources": (
-                    [ds.dict() for ds in ai_response.data_sources]
-                    if ai_response.data_sources
-                    else []
-                ),
-            },
-        )
+        if user_id and conversation:
+            conversation_repo.add_message(
+                conversation_id=conversation.id,
+                role=ConversationRole.bot,
+                content=ai_response.answer,
+                metadata={
+                    "listing_id": str(request.listing_id) if request.listing_id else None,
+                    "query_type": "generic" if is_generic_query else "property_specific",
+                    "needs_vendor_contact": ai_response.needs_vendor_contact,
+                    "nearby_properties": nearby_properties,
+                    "amenity_links": amenity_links,
+                    "data_sources": (
+                        [ds.dict() for ds in ai_response.data_sources]
+                        if ai_response.data_sources
+                        else []
+                    ),
+                },
+            )
 
         # ----------------------------------------------------------
         # Build response
         # ----------------------------------------------------------
         response = {
             "answer": ai_response.answer,
-            "conversation_id": str(conversation.id),
+            "conversation_id": str(conversation.id) if conversation else None,
             "timestamp": datetime.utcnow().isoformat(),
         }
 
