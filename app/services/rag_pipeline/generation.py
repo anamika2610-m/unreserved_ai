@@ -274,6 +274,7 @@ class ResponseGenerator:
             property_sufficient = False
             insufficiency_reason = ""
             display_price = True  # Initialize at function scope level
+            property_sufficient = False  # Initialize to False
             
             # Step 1/4: Try property JSON chunks (excludes property_document)
             if listing_id:
@@ -329,16 +330,29 @@ class ResponseGenerator:
                         )
                 
                 # Check if property JSON data is sufficient
-                if property_json_data_sources:
+                # IMPORTANT: Also check if location_context has nearby properties (even if no JSON chunks)
+                if property_json_data_sources or property_location_context:
+                    # For sufficiency check, we need at least an empty list if no data sources
+                    check_data_sources = property_json_data_sources if property_json_data_sources else []
+                    
                     property_sufficient, insufficiency_reason = self.augmenter.check_data_sufficiency(
                         query=query,
                         retrieved_context=property_json_context,
-                        data_sources=property_json_data_sources
+                        data_sources=check_data_sources,
+                        location_context=property_location_context
                     )
-                    print(f"           → Found {len(property_json_data_sources)} JSON chunks")
-                    top_similarity = property_json_data_sources[0].similarity_score if property_json_data_sources[0].similarity_score is not None else 0.0
-                    print(f"           → Top similarity: {top_similarity:.4f}")
-                    print(f"           → Sufficient: {property_sufficient}")
+                    
+                    if property_json_data_sources:
+                        print(f"           → Found {len(property_json_data_sources)} JSON chunks")
+                        top_similarity = property_json_data_sources[0].similarity_score if property_json_data_sources[0].similarity_score is not None else 0.0
+                        print(f"           → Top similarity: {top_similarity:.4f}")
+                        print(f"           → Sufficient: {property_sufficient}")
+                    elif property_location_context and property_location_context.get('nearby_properties_json'):
+                        # No JSON chunks but we have location context with nearby properties
+                        print(f"           → No property JSON chunks found, but location_context has nearby properties")
+                        print(f"           → Sufficient: {property_sufficient}")
+                    else:
+                        print(f"           → No property JSON chunks found")
                 else:
                     print(f"           → No property JSON chunks found")
                     insufficiency_reason = "No property JSON chunks found"
@@ -375,7 +389,8 @@ class ResponseGenerator:
                             property_sufficient, insufficiency_reason = self.augmenter.check_data_sufficiency(
                                 query=query,
                                 retrieved_context=property_pdf_context,
-                                data_sources=property_pdf_data_sources
+                                data_sources=property_pdf_data_sources,
+                                location_context=property_location_context
                             )
                             print(f"           → Found {len(property_pdf_data_sources)} PDF chunks")
                             top_similarity = property_pdf_data_sources[0].similarity_score if property_pdf_data_sources[0].similarity_score is not None else 0.0
@@ -453,41 +468,51 @@ class ResponseGenerator:
                             print(f"✅ Step 1/4: JSON data contains answer for backend attribute query - NOT supplementing with PDFs")
                             # Use JSON data only - don't supplement with PDFs
                 else:
-                    print(f"⚠️  Step 1/4: No Property JSON chunks found")
-                    print(f"           → Reason: {insufficiency_reason}")
-                    
-                    # Step 2/4: Try property-specific PDFs (only if NO JSON data exists)
-                    print(f"🔍 Step 2/4: No JSON data → Trying property-specific PDFs (property_document chunks)")
-                    property_pdf_context, property_pdf_data_sources, property_location_context = self.augmenter.augment_query_pdf_chunks(
-                        query=query,
-                        listing_id=listing_id,
-                        n_results=n_retrieval_results
-                    )
-                    
-                    # Check if property PDF data is sufficient
-                    if property_pdf_data_sources:
-                        property_sufficient, insufficiency_reason = self.augmenter.check_data_sufficiency(
-                            query=query,
-                            retrieved_context=property_pdf_context,
-                            data_sources=property_pdf_data_sources
-                        )
-                        print(f"           → Found {len(property_pdf_data_sources)} PDF chunks")
-                        top_similarity = property_pdf_data_sources[0].similarity_score if property_pdf_data_sources[0].similarity_score is not None else 0.0
-                        print(f"           → Top similarity: {top_similarity:.4f}")
-                        print(f"           → Sufficient: {property_sufficient}")
-                    else:
-                        print(f"           → No property PDF chunks found")
-                        insufficiency_reason = "No property PDF chunks found"
-                    
-                    if property_sufficient and property_pdf_data_sources:
-                        print(f"✅ Step 2/4: Property PDF chunks sufficient → using PDF data")
-                        context = property_pdf_context
-                        data_sources = property_pdf_data_sources
+                    # Check if we already have sufficient data from location_context (e.g., nearby properties)
+                    if property_sufficient and property_location_context and property_location_context.get('nearby_properties_json'):
+                        print(f"✅ Step 1/4: No JSON chunks BUT location_context has nearby properties → Data SUFFICIENT")
+                        # Use location context data even without traditional chunks
+                        context = ""  # No text context needed for nearby properties
+                        data_sources = []  # No traditional data sources, but we have location_context
                         location_context = property_location_context
                         query_source = 'property'
                     else:
-                        print(f"⚠️  Step 2/4: Property PDF chunks insufficient")
+                        print(f"⚠️  Step 1/4: No Property JSON chunks found")
                         print(f"           → Reason: {insufficiency_reason}")
+                        
+                        # Step 2/4: Try property-specific PDFs (only if NO JSON data exists)
+                        print(f"🔍 Step 2/4: No JSON data → Trying property-specific PDFs (property_document chunks)")
+                        property_pdf_context, property_pdf_data_sources, property_location_context = self.augmenter.augment_query_pdf_chunks(
+                            query=query,
+                            listing_id=listing_id,
+                            n_results=n_retrieval_results
+                        )
+                        
+                        # Check if property PDF data is sufficient
+                        if property_pdf_data_sources:
+                            property_sufficient, insufficiency_reason = self.augmenter.check_data_sufficiency(
+                                query=query,
+                                retrieved_context=property_pdf_context,
+                                data_sources=property_pdf_data_sources,
+                                location_context=property_location_context
+                            )
+                            print(f"           → Found {len(property_pdf_data_sources)} PDF chunks")
+                            top_similarity = property_pdf_data_sources[0].similarity_score if property_pdf_data_sources[0].similarity_score is not None else 0.0
+                            print(f"           → Top similarity: {top_similarity:.4f}")
+                            print(f"           → Sufficient: {property_sufficient}")
+                        else:
+                            print(f"           → No property PDF chunks found")
+                            insufficiency_reason = "No property PDF chunks found"
+                        
+                        if property_sufficient and property_pdf_data_sources:
+                            print(f"✅ Step 2/4: Property PDF chunks sufficient → using PDF data")
+                            context = property_pdf_context
+                            data_sources = property_pdf_data_sources
+                            location_context = property_location_context
+                            query_source = 'property'
+                        else:
+                            print(f"⚠️  Step 2/4: Property PDF chunks insufficient")
+                            print(f"           → Reason: {insufficiency_reason}")
             else:
                 print(f"🔍 No listing_id provided → skipping property data (Steps 1-2/4)")
             
@@ -495,7 +520,9 @@ class ResponseGenerator:
             generic_context = ""
             generic_data_sources = []
             
-            if not property_sufficient or (not property_json_data_sources and not property_pdf_data_sources):
+            # Skip generic knowledge if we already have sufficient data (including location_context with nearby properties)
+            has_location_data = property_location_context and property_location_context.get('nearby_properties_json')
+            if not property_sufficient or (not property_json_data_sources and not property_pdf_data_sources and not has_location_data):
                 print(f"🔍 Step 3/4: Trying generic knowledge (generic PDFs from generic_knowledge)")
                 generic_context, generic_data_sources, _ = self.augmenter.augment_query(
                     query=query,
@@ -524,7 +551,9 @@ class ResponseGenerator:
                     print(f"⚠️  Step 3/4: No generic knowledge found")
             
             # Step 4/4: If all previous steps failed, escalate to vendor
-            if not property_sufficient or (not property_json_data_sources and not property_pdf_data_sources):
+            # Don't escalate if we have location_context with nearby properties
+            has_location_data = property_location_context and property_location_context.get('nearby_properties_json')
+            if not property_sufficient or (not property_json_data_sources and not property_pdf_data_sources and not has_location_data):
                 if not (generic_data_sources and generic_context and generic_context.strip()):
                     print("⚠️  Step 4/4: All data sources insufficient → escalating to vendor")
                     fallback_reason = insufficiency_reason if insufficiency_reason else "Insufficient information in property JSON, property PDFs, and no relevant generic knowledge found"
@@ -562,7 +591,9 @@ class ResponseGenerator:
                 query_source = 'property'
         
         # 4️⃣ Final check - if we still don't have context, provide fallback
-        if not context or not data_sources:
+        # BUT: Allow location_context with nearby properties as valid data (even if context/data_sources are empty)
+        has_location_data = location_context and location_context.get('nearby_properties_json')
+        if (not context or not data_sources) and not has_location_data:
             # Final fallback - no data from either source
             print("⚠️  No data found in property or generic stores → providing fallback message")
             answer = (
@@ -713,6 +744,31 @@ class ResponseGenerator:
             # Use relevant links if available, otherwise use suggested links
             pre_generated_amenity_links = relevant if relevant else suggested
             print(f"   → Pre-generated {len(pre_generated_amenity_links)} links for prompt")
+        
+        # 🏘️ Add nearby properties to context if available (for LLM to see)
+        if location_context and location_context.get('nearby_properties_json'):
+            nearby_props = location_context['nearby_properties_json']
+            print(f"🏘️  Adding {len(nearby_props)} nearby properties to context for LLM")
+            
+            # Format nearby properties as text for the LLM
+            nearby_context = "\n\n=== NEARBY PROPERTIES ===\n"
+            nearby_context += f"There are {len(nearby_props)} properties for sale near this location:\n\n"
+            
+            for idx, prop in enumerate(nearby_props, 1):
+                nearby_context += f"{idx}. **{prop.get('title', 'Untitled Property')}**\n"
+                nearby_context += f"   Address: {prop.get('address', 'N/A')}\n"
+                nearby_context += f"   Distance: {prop.get('distance', 'N/A')}\n"
+                if prop.get('price'):
+                    nearby_context += f"   Price: ${prop['price']:,.0f}\n"
+                if prop.get('bedrooms'):
+                    nearby_context += f"   Bedrooms: {prop['bedrooms']}\n"
+                if prop.get('bathrooms'):
+                    nearby_context += f"   Bathrooms: {prop['bathrooms']}\n"
+                nearby_context += f"   Listing Type: {prop.get('listingType', 'N/A').replace('_', ' ').title()}\n"
+                nearby_context += "\n"
+            
+            # Add to context
+            context = context + nearby_context if context else nearby_context
         
         # 6️⃣ Prompt creation
         # DEBUG: Log context before prompt creation
