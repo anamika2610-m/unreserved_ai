@@ -686,6 +686,36 @@ class PropertyRetriever:
             for same_suburb_prop in same_suburb_properties:
                 self._enrich_property_with_chunks(same_suburb_prop)
         
+        # Format nearby properties JSON and add property media
+        nearby_properties_json = []
+        if nearby_properties:
+            nearby_properties_json = format_nearby_properties_json(nearby_properties)
+            print(f"📸 Formatted {len(nearby_properties_json)} nearby properties, now fetching property media...")
+            
+            # Fetch property media for all nearby properties
+            listing_ids = [prop.get('id') for prop in nearby_properties_json if prop.get('id')]
+            print(f"📸 Extracted {len(listing_ids)} listing IDs: {listing_ids}")
+            
+            if listing_ids:
+                try:
+                    with self._get_listing_repository() as listing_repo:
+                        property_media_dict = listing_repo.get_multiple_listing_property_media(listing_ids)
+                        print(f"📸 Fetched property media for {len(property_media_dict)} listings")
+                        
+                        # Add propertyMedia array to each property
+                        for prop in nearby_properties_json:
+                            listing_id = prop.get('id')
+                            if listing_id and listing_id in property_media_dict:
+                                media_count = len(property_media_dict[listing_id])
+                                prop['propertyMedia'] = property_media_dict[listing_id]
+                                print(f"   ✅ Added {media_count} media items to listing {listing_id}")
+                            else:
+                                print(f"   ⚠️  No media found for listing {listing_id}")
+                except Exception as e:
+                    import traceback
+                    print(f"⚠️  Error fetching nearby property media: {e}")
+                    print(f"⚠️  Traceback: {traceback.format_exc()}")
+        
         location_context = {
             'latitude': current_lat,
             'longitude': current_lon,
@@ -694,7 +724,7 @@ class PropertyRetriever:
             'query_type': query_type,
             'nearby_properties': nearby_properties,
             'same_suburb_properties': same_suburb_properties,
-            'nearby_properties_json': format_nearby_properties_json(nearby_properties) if nearby_properties else [],
+            'nearby_properties_json': nearby_properties_json,
             'formatted_context': format_location_info_for_prompt(
                 latitude=current_lat,
                 longitude=current_lon,

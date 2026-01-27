@@ -207,7 +207,32 @@ Send a message to the chatbot.
 {
   "answer": "The asking price for this property is **$399,000**...",
   "conversation_id": "6a57903b-0e5d-4b60-8d50-0df627693943",
-  "nearby_properties": [...],
+  "nearby_properties": [
+    {
+      "id": "90e25400-ff34-440f-8389-ee40bb5537b6",
+      "slug": "brand-new-4-bedroom-house",
+      "title": "Brand New 4-Bedroom House",
+      "price": 200000,
+      "address": "Surry Hills NSW",
+      "bedrooms": 4,
+      "bathrooms": 3,
+      "distance": "0.5 km",
+      "distanceKm": 0.49,
+      "propertyMedia": [
+        {
+          "id": "34dd7e2f-981f-4506-99a9-706c22d661c4",
+          "displayOrder": 1,
+          "mediaMetadata": {
+            "id": "60b5bc89-d9b6-4698-b55c-491aee6f74e1",
+            "fileName": "property-image.jpeg",
+            "fileType": "jpeg",
+            "fileUrl": "https://example.com/image.jpg",
+            "altText": ""
+          }
+        }
+      ]
+    }
+  ],
   "amenity_links": [...],
   "timestamp": "2026-01-15T10:30:00"
 }

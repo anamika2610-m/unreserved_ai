@@ -268,7 +268,8 @@ class QueryAugmenter:
         self,
         query: str,
         retrieved_context: str,
-        data_sources: List[DataSource]
+        data_sources: List[DataSource],
+        location_context: Optional[Dict] = None
     ) -> Tuple[bool, Optional[str]]:
         """
         Check if retrieved data is sufficient to answer the query.
@@ -277,15 +278,31 @@ class QueryAugmenter:
             query: Original query
             retrieved_context: Retrieved context
             data_sources: List of data sources used
+            location_context: Optional location context with nearby properties
             
         Returns:
             Tuple of (is_sufficient, reason_if_insufficient)
         """
-        if not data_sources:
-            return False, "No relevant property listing information found."
-        
         query_lower = query.lower()
         context_lower = retrieved_context.lower()
+        
+        # Check nearby properties queries FIRST (before checking data_sources)
+        # This is important because nearby properties queries might not have traditional data_sources
+        if (any(kw in query_lower for kw in NEARBY_PROPERTY_KEYWORDS) and 
+            any(kw in query_lower for kw in PROPERTY_ENTITY_KEYWORDS)):
+            # If we have location_context with nearby properties, data is sufficient!
+            if location_context:
+                nearby_props = location_context.get('nearby_properties_json', [])
+                if nearby_props:
+                    print(f"✅ SUFFICIENT: Found {len(nearby_props)} nearby properties in location_context")
+                    return True, None
+            # Otherwise, check if context mentions nearby properties
+            if 'nearby properties' in context_lower or 'found 0 properties near' not in context_lower:
+                return True, None  # We have data or LLM will handle it
+        
+        # For non-nearby-properties queries, check if we have data sources
+        if not data_sources:
+            return False, "No relevant property listing information found."
         
         # Check price queries
         price_query = any(kw in query_lower for kw in PRICE_KEYWORDS)
@@ -302,13 +319,6 @@ class QueryAugmenter:
         if any(kw in query_lower for kw in LOCATION_KEYWORDS):
             if 'address' not in context_lower and 'location' not in context_lower:
                 return False, "Location information not found in listing data."
-        
-        # Check nearby properties queries
-        if (any(kw in query_lower for kw in NEARBY_PROPERTY_KEYWORDS) and 
-            any(kw in query_lower for kw in PROPERTY_ENTITY_KEYWORDS)):
-            # If query is about nearby properties, check if we have that info
-            if 'nearby properties' in context_lower or 'found 0 properties near' not in context_lower:
-                return True, None  # We have data or LLM will handle it
         
         # Check amenity queries (schools, hospitals, etc.)
         # Amenity information is typically in property PDFs, not JSON chunks

@@ -384,6 +384,93 @@ class ListingRepository:
         result = self._execute_query_one(query, {"listing_id": listing_id})
         return result.get("fileUrl") if result else None
     
+    def get_multiple_listing_hero_images(self, listing_ids: List[str]) -> Dict[str, str]:
+        """
+        Get hero image URLs for multiple listings at once.
+        
+        Args:
+            listing_ids: List of listing IDs
+            
+        Returns:
+            Dictionary mapping listing_id to image URL
+        """
+        if not listing_ids:
+            return {}
+        
+        query = """
+            WITH RankedImages AS (
+                SELECT 
+                    l.id as listing_id,
+                    mm.file_url as "fileUrl",
+                    ROW_NUMBER() OVER (PARTITION BY l.id ORDER BY pm.display_order ASC) as rn
+                FROM listings l
+                JOIN properties p ON l.property_id = p.id
+                JOIN property_media pm ON p.id = pm.property_id
+                JOIN media_metadata mm ON pm.file_id = mm.id
+                WHERE l.id = ANY(:listing_ids)
+                AND mm.file_type IN ('jpg', 'jpeg', 'png', 'webp')
+            )
+            SELECT listing_id, "fileUrl"
+            FROM RankedImages
+            WHERE rn = 1
+        """
+        results = self._execute_query(query, {"listing_ids": listing_ids})
+        return {row["listing_id"]: row["fileUrl"] for row in results}
+    
+    def get_multiple_listing_property_media(self, listing_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get full property media arrays for multiple listings at once.
+        
+        Args:
+            listing_ids: List of listing IDs
+            
+        Returns:
+            Dictionary mapping listing_id to list of property media objects
+        """
+        if not listing_ids:
+            return {}
+        
+        query = """
+            SELECT 
+                l.id as listing_id,
+                pm.id as pm_id,
+                pm.display_order as "displayOrder",
+                mm.id as mm_id,
+                mm.file_name as "fileName",
+                mm.file_type as "fileType",
+                mm.file_url as "fileUrl",
+                mm.alt_text as "altText"
+            FROM listings l
+            JOIN properties p ON l.property_id = p.id
+            JOIN property_media pm ON p.id = pm.property_id
+            JOIN media_metadata mm ON pm.file_id = mm.id
+            WHERE l.id = ANY(:listing_ids)
+            AND mm.file_type IN ('jpg', 'jpeg', 'png', 'webp')
+            ORDER BY l.id, pm.display_order ASC
+        """
+        results = self._execute_query(query, {"listing_ids": listing_ids})
+        
+        # Group by listing_id (convert to string for consistency)
+        media_by_listing = {}
+        for row in results:
+            listing_id = str(row["listing_id"])  # Convert UUID to string
+            if listing_id not in media_by_listing:
+                media_by_listing[listing_id] = []
+            
+            media_by_listing[listing_id].append({
+                "id": str(row["pm_id"]),  # Convert UUID to string
+                "displayOrder": row["displayOrder"],
+                "mediaMetadata": {
+                    "id": str(row["mm_id"]),  # Convert UUID to string
+                    "fileName": row["fileName"],
+                    "fileType": row["fileType"],
+                    "fileUrl": row["fileUrl"],
+                    "altText": row["altText"] or ""
+                }
+            })
+        
+        return media_by_listing
+    
     def get_listing_location(self, listing_id: str) -> Optional[Dict[str, Any]]:
         """
         Get location data (latitude, longitude, address, suburb) for a listing.
