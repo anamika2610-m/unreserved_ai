@@ -341,8 +341,8 @@ class PropertyListingChunker:
                 parts.append(f"Auction Start Price: ${auction_start_price:,.0f}" if isinstance(auction_start_price, (int, float)) else f"Auction Start Price: {auction_start_price}")
             if listing.get('auctionStartDate'):
                 parts.append(f"Auction Start: {listing.get('auctionStartDate')}")
-            if listing.get('auctionEndDate'):
-                parts.append(f"Auction End: {listing.get('auctionEndDate')}")
+            # if listing.get('auctionEndDate'):
+            #     parts.append(f"Auction End: {listing.get('auctionEndDate')}")
         elif listing_type == 'private_sale':
             parts.append("Sale Method: Private Sale")
             if price and display_price:
@@ -480,8 +480,8 @@ class PropertyListingChunker:
             
             if listing.get('auctionStartDate'):
                 parts.append(f"Start Date: {listing.get('auctionStartDate')}")
-            if listing.get('auctionEndDate'):
-                parts.append(f"End Date: {listing.get('auctionEndDate')}")
+            # if listing.get('auctionEndDate'):
+            #     parts.append(f"End Date: {listing.get('auctionEndDate')}")
             
             if listing.get('activeBidCount', 0) > 0:
                 parts.append(f"\nCurrent Bidding Status:")

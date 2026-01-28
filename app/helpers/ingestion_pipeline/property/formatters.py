@@ -122,7 +122,7 @@ def format_listing_for_chunking(listing: Dict[str, Any]) -> Dict[str, Any]:
         'displayPrice': listing.get('displayPrice', False),
         'auctionStartPrice': listing.get('auctionStartPrice'),
         'auctionStartDate': listing.get('auctionStartDate'),
-        'auctionEndDate': listing.get('auctionEndDate'),
+        # 'auctionEndDate': listing.get('auctionEndDate'),
         
         'publishedAt': listing.get('publishedAt'),
         'allowPrivateInspection': listing.get('allowPrivateInspection', False),
