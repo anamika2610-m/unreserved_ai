@@ -56,7 +56,7 @@ class PropertyListing(BaseModel):
     property_agents: List[PropertyAgent] = Field(default_factory=list, description="Property agents")
     published_at: Optional[str] = Field(None, description="Publication date")
     auction_start_date: Optional[str] = Field(None, description="Auction start date")
-    auction_end_date: Optional[str] = Field(None, description="Auction end date")
+    # auction_end_date: Optional[str] = Field(None, description="Auction end date")
 
 class BuyerEnquiry(BaseModel):
     """

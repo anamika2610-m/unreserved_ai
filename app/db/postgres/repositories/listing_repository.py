@@ -111,7 +111,6 @@ class ListingRepository:
             l.price,
             l.auction_start_price as "auctionStartPrice",
             l.auction_start_date as "auctionStartDate",
-            l.auction_end_date as "auctionEndDate",
             l.reserve_price as "reservePrice",
             p.slug,
             p.title,
@@ -555,8 +554,8 @@ class ListingRepository:
         
         params = {}
         if exclude_listing_id:
-            query_str += " AND l.id != :exclude_listing_id"
-            params['exclude_listing_id'] = exclude_listing_id
+            query_str += " AND l.id::text != :exclude_listing_id"
+            params['exclude_listing_id'] = str(exclude_listing_id)
         
         rows = self._execute_query(query_str, params)
         
@@ -619,8 +618,8 @@ class ListingRepository:
         
         params = {'suburb': suburb}
         if exclude_listing_id:
-            query_str += " AND l.id != :exclude_listing_id"
-            params['exclude_listing_id'] = exclude_listing_id
+            query_str += " AND l.id::text != :exclude_listing_id"
+            params['exclude_listing_id'] = str(exclude_listing_id)
         
         if limit:
             query_str += " LIMIT :limit"

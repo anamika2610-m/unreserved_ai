@@ -690,6 +690,16 @@ class PropertyRetriever:
         nearby_properties_json = []
         if nearby_properties:
             nearby_properties_json = format_nearby_properties_json(nearby_properties)
+            
+            # Filter out the current listing from nearby properties (shouldn't be in "nearby" list)
+            original_count = len(nearby_properties_json)
+            nearby_properties_json = [
+                prop for prop in nearby_properties_json 
+                if prop.get('id') != listing_id
+            ]
+            if len(nearby_properties_json) < original_count:
+                print(f"🏠 Filtered out current listing ({listing_id}) from nearby properties")
+            
             print(f"📸 Formatted {len(nearby_properties_json)} nearby properties, now fetching property media...")
             
             # Fetch property media for all nearby properties
