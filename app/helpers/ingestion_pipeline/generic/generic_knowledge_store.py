@@ -268,28 +268,61 @@ class GenericKnowledgeStore:
         if doc_categories:
             params['categories'] = doc_categories
         
+        result = None
         try:
-            with self._handle_errors():
-                result = self.db_session.execute(sql, params)
-                rows = result.fetchall()
-                
-                # DEBUG: Log search results
-                print(f"   🔍 DEBUG Search: Query='{query}', Found {len(rows)} rows from database")
-                if rows:
-                    for i, row in enumerate(rows[:3], 1):
-                        similarity = float(row[5]) if len(row) > 5 else 0.0
-                        content_preview = str(row[3])[:100] if len(row) > 3 else "N/A"
-                        print(f"   🔍 DEBUG Row {i}: similarity={similarity:.4f}, preview='{content_preview}...'")
-                else:
-                    print(f"   ⚠️  DEBUG: No rows returned from database query")
-                
-                return self._format_search_results(rows)
+            # Execute query and fetch results
+            result = self.db_session.execute(sql, params)
+            rows = result.fetchall()
+            
+            # Explicitly close the result immediately after fetching
+            result.close()
+            result = None
+            
+            # Commit the read transaction immediately to release locks
+            # This prevents "idle in transaction" state
+            self.db_session.commit()
+            
+            # DEBUG: Log search results
+            print(f"   🔍 DEBUG Search: Query='{query}', Found {len(rows)} rows from database")
+            if rows:
+                for i, row in enumerate(rows[:3], 1):
+                    similarity = float(row[5]) if len(row) > 5 else 0.0
+                    content_preview = str(row[3])[:100] if len(row) > 3 else "N/A"
+                    print(f"   🔍 DEBUG Row {i}: similarity={similarity:.4f}, preview='{content_preview}...'")
+            else:
+                print(f"   ⚠️  DEBUG: No rows returned from database query")
+            
+            return self._format_search_results(rows)
         
         except Exception as e:
             print(f"❌ Search failed: {e}")
             import traceback
             traceback.print_exc()
+            # Ensure rollback on error
+            try:
+                self.db_session.rollback()
+            except:
+                pass
             return []
+        finally:
+            # Always close result if it wasn't closed
+            if result is not None:
+                try:
+                    result.close()
+                except:
+                    pass
+            # Ensure transaction is committed or rolled back
+            # Check if session is in a transaction and rollback if needed
+            try:
+                # Try to check transaction state (SQLAlchemy 2.0+)
+                if hasattr(self.db_session, 'in_transaction'):
+                    if self.db_session.in_transaction():
+                        self.db_session.rollback()
+                elif hasattr(self.db_session, 'is_active'):
+                    if self.db_session.is_active:
+                        self.db_session.rollback()
+            except:
+                pass
     
     def _format_search_results(self, rows: List) -> List[Dict[str, Any]]:
         """

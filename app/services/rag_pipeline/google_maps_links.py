@@ -81,7 +81,7 @@ INVALID_TERMS = [
 
 # Common stop words for search term extraction
 STOP_WORDS = {
-    'nearby', 'near', 'close', 'around', 'surrounding', 'proximity', 'within',
+    'nearby', 'near', 'nearest', 'closest', 'close', 'around', 'surrounding', 'proximity', 'within',
     'are', 'is', 'there', 'any', 'the', 'a', 'an', 'to', 'by', 'me',
     'list', 'down', 'show', 'find', 'tell', 'me', 'about',
     'what', 'how', 'where', 'which', 'can', 'you', 'i',
@@ -451,6 +451,67 @@ def _find_matching_amenity_type(search_term: str) -> Tuple[str, str]:
     return DEFAULT_LOCATION_ICON, "custom"
 
 
+def _normalize_search_term_for_maps(search_term: str) -> str:
+    """
+    Normalize a search term for Google Maps by removing location qualifiers
+    and mapping query phrases to proper search terms.
+    
+    This ensures Google Maps searches for amenities near the property coordinates,
+    not based on the user's location or query phrasing.
+    
+    Args:
+        search_term: Raw search term from user query
+        
+    Returns:
+        Normalized search term suitable for Google Maps
+        
+    Examples:
+        >>> _normalize_search_term_for_maps("nearest school")
+        'schools'
+        >>> _normalize_search_term_for_maps("closest hospital")
+        'hospitals'
+        >>> _normalize_search_term_for_maps("nearby coffee shops")
+        'coffee shops'
+        >>> _normalize_search_term_for_maps("school")
+        'schools'
+    """
+    term_lower = search_term.lower().strip()
+    
+    # Location qualifiers to remove (these cause Google Maps to search based on user location)
+    location_qualifiers = ['nearest', 'closest', 'nearby', 'near', 'close', 'local']
+    
+    # Split into words and filter out location qualifiers
+    words = term_lower.split()
+    filtered_words = [w for w in words if w not in location_qualifiers]
+    
+    if not filtered_words:
+        # If all words were qualifiers, return a generic term based on context
+        # This shouldn't happen if STOP_WORDS is working, but safety check
+        return "places"
+    
+    normalized = ' '.join(filtered_words)
+    
+    # Map singular to plural for common amenities (better for Google Maps search)
+    singular_to_plural = {
+        'school': 'schools',
+        'hospital': 'hospitals',
+        'supermarket': 'supermarkets',
+        'restaurant': 'restaurants',
+        'cafe': 'cafes',
+        'pharmacy': 'pharmacies',
+        'bank': 'banks',
+        'gym': 'gyms',
+        'park': 'parks',
+        'bus stop': 'bus stops',
+        'train station': 'train stations',
+    }
+    
+    if normalized in singular_to_plural:
+        normalized = singular_to_plural[normalized]
+    
+    return normalized
+
+
 def generate_custom_search_link(
     search_term: str,
     latitude: float,
@@ -478,20 +539,24 @@ def generate_custom_search_link(
             'url': 'https://www.google.com/maps/search/coffee+shops/@-33.8688,151.2093,15z'
         }
     """
-    # URL encode the search term
-    encoded_term = search_term.replace(' ', '+')
+    # Normalize the search term to remove location qualifiers (nearest, closest, etc.)
+    # This ensures Google Maps searches near the property coordinates, not user location
+    normalized_term = _normalize_search_term_for_maps(search_term)
+    
+    # URL encode the normalized search term
+    encoded_term = normalized_term.replace(' ', '+')
     url = _build_google_maps_url(encoded_term, latitude, longitude, zoom)
     
-    # Create a nice label (title case)
-    label = search_term.title()
+    # Create a nice label from the normalized term (title case)
+    label = normalized_term.title()
     
     # Try to find a matching icon and amenity type from predefined types
-    icon, amenity_type = _find_matching_amenity_type(search_term)
+    icon, amenity_type = _find_matching_amenity_type(normalized_term)
     
     return {
         "type": "custom",
         "amenity_type": amenity_type,
-        "search_term": search_term,
+        "search_term": normalized_term,  # Use normalized term
         "label": label,
         "icon": icon,
         "url": url

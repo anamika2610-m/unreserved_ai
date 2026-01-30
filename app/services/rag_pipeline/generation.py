@@ -42,11 +42,14 @@ NEGOTIATION_KEYWORDS = [
 
 STRONG_GENERIC_KEYWORDS = [
     'sale of land act', 'estate agents act', 'section 32 statement', 'vendor statement',
-    'cooling off', 'underquoting', 'trust account', 'licensing', 'aml',
-    'anti-money laundering', 'aml requirements', 'aml requirement', 'aml laws',
+    'vendor disclosure', 'section 32', 'cooling off', 'underquoting', 'trust account', 
+    'licensing', 'aml', 'anti-money laundering', 'aml requirements', 'aml requirement', 'aml laws',
     'how do i become', 'license do i need',
     'statement of information', 'what license', 'which license',
-    'estate agents act', 'property law act', 'conveyancing act'
+    'estate agents act', 'property law act', 'conveyancing act',
+    'buying process', 'purchase process', 'sale process', 'settlement process',
+    'auction process', 'how auctions work', 'deposit handling', 'buyer deposit',
+    'auction', 'auctions', 'how auction', 'how auctions', 'auction function', 'auctions function'
 ]
 
 INVALID_AMENITY_TERMS = [
@@ -169,6 +172,30 @@ class ResponseGenerator:
                 "nearby_properties": [],
                 "amenity_links": [],
             }
+        
+        # 0.5️⃣ Check for greetings FIRST (before any routing)
+        enquiry_type = detect_enquiry_type(query)
+        if enquiry_type == "greeting":
+            print("👋 Greeting detected → returning friendly welcome message")
+            answer = (
+                "Hello! 👋 I'm here to help you learn more about this property. "
+                "You can ask me about:\n\n"
+                "• **Pricing** and sale methods\n"
+                "• **Property features** (bedrooms, bathrooms, land area, etc.)\n"
+                "• **Location** and nearby amenities\n"
+                "• **Nearby properties** for sale\n"
+                "• **Property documents** (aerial views, bushfire/flood information, etc.)\n\n"
+                "What would you like to know?"
+            )
+            return self._create_response_dict(
+                answer=answer,
+                needs_vendor_contact=False,
+                escalation_reason=None,
+                data_sources=[],
+                query=query,
+                listing_id=listing_id,
+                user_id=user_id,
+            )
         
         # 1️⃣ Check for negotiation/pricing advice queries FIRST (must escalate to vendor)
         query_lower = query.lower()
@@ -636,7 +663,8 @@ class ResponseGenerator:
         # Data sufficiency check is already done above, so we can proceed
         is_sufficient = True
 
-        # 3️⃣ Enquiry type routing
+        # 3️⃣ Enquiry type routing (greeting already handled earlier)
+        # Re-detect enquiry_type here for personal_advice check (greeting was already handled)
         enquiry_type = detect_enquiry_type(query)
         
         if enquiry_type == "personal_advice":
@@ -769,6 +797,19 @@ class ResponseGenerator:
             
             # Add to context
             context = context + nearby_context if context else nearby_context
+
+        # 🏫 For "nearby schools" queries, extract school names (and any explicit distances)
+        # from the listing context and prepend a short structured block.
+        # This prevents the LLM from mentioning only one school when multiple are present in PDFs.
+        if context and is_amenity_query(query):
+            ql = query.lower()
+            if "school" in ql or "schools" in ql:
+                school_lines = self._extract_school_lines_from_context(context)
+                if school_lines:
+                    schools_block = "\n\n=== SCHOOLS MENTIONED IN LISTING DATA ===\n" + "\n".join(
+                        f"- {line}" for line in school_lines
+                    ) + "\n"
+                    context = schools_block + "\n" + context
         
         # 6️⃣ Prompt creation
         # DEBUG: Log context before prompt creation
@@ -1058,6 +1099,44 @@ class ResponseGenerator:
             "amenity_links": amenity_links or [],
         }
 
+    def _extract_school_lines_from_context(self, context: str) -> List[str]:
+        """
+        Best-effort extraction of school names (and optional distances) from listing context.
+        This is used to make responses deterministic for school questions without inventing data.
+        """
+        import re
+
+        # Common school name patterns found in PDFs
+        name_pat = re.compile(
+            r"\b([A-Z][A-Za-z&'’\-\s]{2,}?\s(?:Primary School|Secondary College|Secondary School|College|Grammar|School))\b"
+        )
+
+        candidates = [m.group(1).strip() for m in name_pat.finditer(context)]
+
+        # De-dupe preserving order
+        seen = set()
+        names: List[str] = []
+        for n in candidates:
+            key = re.sub(r"\s+", " ", n).strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                names.append(n)
+
+        if not names:
+            return []
+
+        lines: List[str] = []
+        for name in names[:8]:  # cap
+            idx = context.find(name)
+            window = context[max(0, idx - 140): min(len(context), idx + 260)] if idx != -1 else context
+            m = re.search(r"(?:approx(?:imately)?\\.?\\s*)?(\\d+(?:\\.\\d+)?)\\s*km", window, flags=re.IGNORECASE)
+            if m:
+                lines.append(f"**{name}** (approximately **{m.group(1)} km** away)")
+            else:
+                lines.append(f"**{name}**")
+
+        return lines
+
     def _generate_personal_advice_message(self, query: str) -> str:
         return (
             "I'm not able to provide personalized advice on pricing, negotiation, "
@@ -1068,13 +1147,12 @@ class ResponseGenerator:
     def _generate_vendor_contact_message(
         self, query: str, reason: Optional[str] = None
     ) -> str:
-        message = (
+        # IMPORTANT (privacy/UX): never surface internal retrieval reasons to end users.
+        # The `reason` is kept for logging/diagnostics via `escalation_reason`, but must
+        # not appear in the user-facing answer.
+        _ = reason  # explicitly unused
+        return (
             "I don't have sufficient information in the available listing data "
-            "to answer this fully."
+            "to answer this fully.\n\n"
+            "Please contact the vendor or listing agent for accurate details."
         )
-        if reason:
-            message += f" ({reason})"
-        message += (
-            "\n\nPlease contact the vendor or listing agent for accurate details."
-        )
-        return message

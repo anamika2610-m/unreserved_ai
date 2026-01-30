@@ -8,21 +8,22 @@ import time
 from typing import Generator, Optional
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError, DisconnectionError
 from sqlalchemy.orm import Session, sessionmaker
 from pydantic_settings import BaseSettings
+import psycopg
 
 
 # Constants
-CONNECT_TIMEOUT = 30  # seconds
+CONNECT_TIMEOUT = 60  # seconds (increased for remote databases that may be sleeping)
 POOL_RECYCLE = 300  # 5 minutes
 POOL_SIZE = 5
 MAX_OVERFLOW = 10
-POOL_TIMEOUT = 60  # seconds
+POOL_TIMEOUT = 120  # seconds (increased for slow connections)
 MAX_RETRIES = 3
-INITIAL_RETRY_DELAY = 1  # seconds
+INITIAL_RETRY_DELAY = 2  # seconds (increased initial delay)
 
 
 class DatabaseSettings(BaseSettings):
@@ -119,6 +120,14 @@ def _build_connect_args(url: str) -> dict:
             "keepalives_count": 5,
         })
     
+    # For remote databases (like Render), ensure SSL is properly configured
+    # This helps with SSL connection stability for cloud databases
+    parsed = urlparse(url)
+    query_params = parse_qs(parsed.query)
+    if "sslmode" not in query_params:
+        # Default to require SSL for remote databases (Render, AWS RDS, etc.)
+        connect_args["sslmode"] = "require"
+    
     return connect_args
 
 
@@ -139,6 +148,9 @@ engine: Engine = create_engine(
     pool_reset_on_return='rollback',
     echo=False,
 )
+
+# Note: pool_pre_ping=True already tests connections before use
+# Additional error handling is done in get_db() and repository methods
 
 # Create session factory
 SessionLocal: sessionmaker[Session] = sessionmaker(
@@ -194,6 +206,23 @@ def get_db() -> Generator[Session, None, None]:
     
     try:
         yield db
+    except (OperationalError, DisconnectionError) as e:
+        # Check if it's a connection closed error
+        error_str = str(e).lower()
+        if any(phrase in error_str for phrase in [
+            'connection has been closed',
+            'terminating connection',
+            'ssl connection has been closed',
+            'connection closed unexpectedly'
+        ]):
+            # Invalidate the connection pool to force new connections
+            try:
+                engine.pool.invalidate()
+                print("⚠️  Connection pool invalidated due to closed connection")
+            except:
+                pass
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         raise

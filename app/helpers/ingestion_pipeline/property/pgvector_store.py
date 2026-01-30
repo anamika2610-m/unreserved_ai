@@ -351,12 +351,29 @@ class PgVectorStore:
         
         max_retries = 3
         rows = []
+        result = None
         for attempt in range(max_retries):
             try:
+                # Execute query
                 result = self.db_session.execute(sql, params)
                 rows = result.fetchall()
+                
+                # Explicitly close the result immediately after fetching
+                result.close()
+                result = None
+                
+                # Commit the read transaction immediately to release locks
+                # This prevents "idle in transaction" state
+                self.db_session.commit()
+                
                 break
             except OperationalError as e:
+                if result:
+                    try:
+                        result.close()
+                        result = None
+                    except:
+                        pass
                 if attempt < max_retries - 1:
                     retry_delay = 1 * (2 ** attempt)
                     print(f"⚠️  Database connection issue (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
@@ -372,6 +389,12 @@ class PgVectorStore:
                     raise
             except Exception as e:
                 # Catch any other errors (like InFailedSqlTransaction)
+                if result:
+                    try:
+                        result.close()
+                        result = None
+                    except:
+                        pass
                 print(f"⚠️  Database error: {type(e).__name__}: {e}")
                 try:
                     self.db_session.rollback()
@@ -384,6 +407,25 @@ class PgVectorStore:
                     time.sleep(retry_delay)
                 else:
                     raise
+            finally:
+                # Always ensure result is closed
+                if result is not None:
+                    try:
+                        result.close()
+                    except:
+                        pass
+                # Ensure transaction is committed or rolled back
+                # Check if session is in a transaction and rollback if needed
+                try:
+                    # Try to check transaction state (SQLAlchemy 2.0+)
+                    if hasattr(self.db_session, 'in_transaction'):
+                        if self.db_session.in_transaction():
+                            self.db_session.rollback()
+                    elif hasattr(self.db_session, 'is_active'):
+                        if self.db_session.is_active:
+                            self.db_session.rollback()
+                except:
+                    pass
         
         results = []
         for row in rows:
