@@ -8,6 +8,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 from sqlalchemy import select, desc, and_
+from sqlalchemy.exc import OperationalError, DisconnectionError
 
 from app.db.models.conversation import (
     Conversation,
@@ -59,8 +60,28 @@ class ConversationRepository(BaseRepository[Conversation]):
                 )
             )
             
-            result = self.session.execute(query)
-            conversation = result.scalar_one_or_none()
+            try:
+                result = self.session.execute(query)
+                conversation = result.scalar_one_or_none()
+            except (OperationalError, DisconnectionError) as e:
+                # Check if it's a connection closed error
+                error_str = str(e).lower()
+                if any(phrase in error_str for phrase in [
+                    'connection has been closed',
+                    'terminating connection',
+                    'ssl connection has been closed',
+                    'connection closed unexpectedly'
+                ]):
+                    # Rollback and retry once with a fresh connection
+                    try:
+                        self.session.rollback()
+                    except:
+                        pass
+                    # Retry the query once
+                    result = self.session.execute(query)
+                    conversation = result.scalar_one_or_none()
+                else:
+                    raise
             
             if conversation:
                 return conversation
@@ -302,3 +323,95 @@ class ConversationRepository(BaseRepository[Conversation]):
 
             result = self.session.execute(query)
             return list(result.scalars().all())
+
+    # ------------------------------------------------------------------
+    # Get all conversations for a listing (for property-level summaries)
+    # ------------------------------------------------------------------
+    def get_listing_conversations(
+        self,
+        listing_id: UUID,
+        active_only: bool = True,
+        limit: Optional[int] = None,
+    ) -> List[Conversation]:
+        """
+        Get all conversations for a specific listing (across all users).
+        Used for generating property-level chat summaries.
+        
+        Args:
+            listing_id: Listing ID
+            active_only: Whether to return only active conversations
+            limit: Optional limit on number of conversations
+            
+        Returns:
+            List of Conversation instances, ordered by most recent first
+        """
+        with self._handle_errors():
+            query = select(Conversation).where(
+                Conversation.listing_id == listing_id
+            )
+
+            if active_only:
+                query = query.where(Conversation.is_active.is_(True))
+
+            query = query.order_by(desc(Conversation.created_at))
+
+            if limit:
+                query = query.limit(limit)
+
+            result = self.session.execute(query)
+            return list(result.scalars().all())
+
+    def get_listing_user_messages(
+        self,
+        listing_id: UUID,
+        limit_per_conversation: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all user messages (questions) for a listing across all conversations.
+        This aggregates user queries while preserving privacy (no user_id in output).
+        
+        Args:
+            listing_id: Listing ID
+            limit_per_conversation: Optional limit on messages per conversation
+            
+        Returns:
+            List of user message dictionaries with content, metadata, and timestamps
+            (user_id is excluded for privacy)
+        """
+        with self._handle_errors():
+            # Get all conversations for this listing
+            conversations = self.get_listing_conversations(
+                listing_id=listing_id,
+                active_only=True,
+            )
+
+            all_user_messages = []
+            for conversation in conversations:
+                # Get user messages only (questions)
+                query = (
+                    select(ChatMessage)
+                    .where(
+                        and_(
+                            ChatMessage.conversation_id == conversation.id,
+                            ChatMessage.role == ConversationRole.user,
+                        )
+                    )
+                    .order_by(ChatMessage.created_at)
+                )
+
+                if limit_per_conversation:
+                    query = query.limit(limit_per_conversation)
+
+                result = self.session.execute(query)
+                messages = result.scalars().all()
+
+                for msg in messages:
+                    # Format message without user_id for privacy
+                    message_data = {
+                        "content": msg.content,
+                        "created_at": msg.created_at.isoformat() if msg.created_at else None,
+                        "query_type": msg.meta_data.get("query_type") if msg.meta_data else None,
+                    }
+                    all_user_messages.append(message_data)
+
+            return all_user_messages

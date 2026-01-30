@@ -345,4 +345,3 @@ async def get_conversation_history(
             detail=f"Error retrieving conversation history: {str(e)}",
         )
 
-

@@ -140,8 +140,8 @@ class QueryAugmenter:
                 if query_type == 'nearby_properties':
                     print(f"🏘️  NEARBY PROPERTIES QUERY DETECTED - calling retrieve_with_location_context")
                     standard_results, location_context = self.retriever.retrieve_with_location_context(
-                        query=query,
-                        listing_id=listing_id,
+            query=query,
+            listing_id=listing_id,
                         n_results=n_results,
                         max_distance_km=15.0,
                         max_nearby_properties=5
@@ -549,6 +549,30 @@ class QueryAugmenter:
             print(f"   Normalized query: '{query}' → '{normalized_query}'")
             print(f"   Expanded query for penalties: '{normalized_query}' → '{expanded_query}'")
         
+        # Vendor disclosure/statement expansion
+        elif 'vendor disclosure' in query_lower or 'vendor statement' in query_lower or 'section 32' in query_lower:
+            # Expand vendor disclosure queries to include all related terms
+            expanded_query = f"{normalized_query} vendor statement section 32 section 32 statement vendor disclosure statement statement of information"
+            print(f"   Normalized query: '{query}' → '{normalized_query}'")
+            print(f"   Expanded query for vendor disclosure: '{normalized_query}' → '{expanded_query}'")
+        
+        # Process queries expansion (buying process, auction process, deposit handling)
+        elif 'buying process' in query_lower or 'purchase process' in query_lower or 'sale process' in query_lower:
+            # Expand process queries to include related terms
+            expanded_query = f"{normalized_query} buying process purchase process sale process settlement conveyancing steps"
+            print(f"   Normalized query: '{query}' → '{normalized_query}'")
+            print(f"   Expanded query for process: '{normalized_query}' → '{expanded_query}'")
+        elif 'auction' in query_lower and ('process' in query_lower or 'work' in query_lower or 'function' in query_lower or 'how' in query_lower or 'explain' in query_lower):
+            # Expand auction process queries
+            expanded_query = f"{normalized_query} auction rules how auctions must be conducted auction process how auctions work auction procedure bidding process"
+            print(f"   Normalized query: '{query}' → '{normalized_query}'")
+            print(f"   Expanded query for auction process: '{normalized_query}' → '{expanded_query}'")
+        elif 'deposit' in query_lower and ('handl' in query_lower or 'requirement' in query_lower or 'manage' in query_lower):
+            # Expand deposit handling queries
+            expanded_query = f"{normalized_query} deposit handling trust account buyer deposit requirements deposit management"
+            print(f"   Normalized query: '{query}' → '{normalized_query}'")
+            print(f"   Expanded query for deposit: '{normalized_query}' → '{expanded_query}'")
+        
         elif normalized_query != query:
             print(f"   Normalized query: '{query}' → '{normalized_query}'")
         
@@ -559,10 +583,16 @@ class QueryAugmenter:
         # Debug: Print similarity scores
         if results:
             print(f"✅ Found {len(results)} results from generic knowledge store")
+            top_similarity = results[0].get('similarity', 0.0) if results else 0.0
             for i, result in enumerate(results[:3], 1):  # Show top 3
                 sim = result.get('similarity', 0.0)
                 content_preview = result.get('content', '')[:100]
                 print(f"   Result {i}: similarity={sim:.4f}, preview='{content_preview}...'")
+            
+            # If top similarity is too low (< 0.3), treat as no results and trigger keyword fallback
+            if top_similarity < 0.3:
+                print(f"⚠️  Top similarity ({top_similarity:.4f}) is too low, triggering keyword fallback")
+                results = []  # Clear results to trigger keyword fallback
         else:
             print(f"⚠️  Generic knowledge store returned no results for query: '{expanded_query}'")
             print(f"   Store has {total_chunks} chunks but none matched the query")
@@ -596,6 +626,38 @@ class QueryAugmenter:
                 fallback_queries.append('trust account violations')
                 fallback_queries.append('underquoting penalties')
                 fallback_queries.append('fines for agents')
+            
+            # 2d. For vendor disclosure/statement queries, try variations
+            if 'vendor disclosure' in query_lower or 'vendor statement' in query_lower or 'section 32' in query_lower:
+                fallback_queries.append('section 32 vendor statement')
+                fallback_queries.append('vendor statement')
+                fallback_queries.append('section 32 statement')
+                fallback_queries.append('statement of information')
+                fallback_queries.append('vendor disclosure')
+            
+            # 2e. For process queries (buying, sale, purchase process)
+            if 'buying process' in query_lower or 'purchase process' in query_lower or 'sale process' in query_lower:
+                fallback_queries.append('buying process')
+                fallback_queries.append('purchase process')
+                fallback_queries.append('sale process')
+                fallback_queries.append('settlement process')
+                fallback_queries.append('conveyancing process')
+            
+            # 2f. For auction process queries
+            if 'auction' in query_lower and ('process' in query_lower or 'work' in query_lower or 'function' in query_lower or 'how' in query_lower or 'explain' in query_lower):
+                fallback_queries.append('auction rules')
+                fallback_queries.append('how auctions must be conducted')
+                fallback_queries.append('auction process')
+                fallback_queries.append('how auctions work')
+                fallback_queries.append('auction procedure')
+                fallback_queries.append('bidding process')
+            
+            # 2g. For deposit handling queries
+            if 'deposit' in query_lower and ('handl' in query_lower or 'requirement' in query_lower or 'manage' in query_lower):
+                fallback_queries.append('deposit handling')
+                fallback_queries.append('buyer deposit')
+                fallback_queries.append('trust account deposit')
+                fallback_queries.append('deposit requirements')
             
             # 3. Try the normalized query without expansion
             if normalized_query != expanded_query:
@@ -670,6 +732,12 @@ class QueryAugmenter:
                     )
                     keyword_rows = keyword_result.fetchall()
                     
+                    # Explicitly close the result to free database resources
+                    keyword_result.close()
+                    
+                    # Commit the read transaction to release locks
+                    self.generic_store.db_session.commit()
+                    
                     if keyword_rows:
                         print(f"   ✅ Keyword fallback found {len(keyword_rows)} chunks")
                         # Format the keyword results the same way as vector search results
@@ -705,6 +773,11 @@ class QueryAugmenter:
                         print(f"   ⚠️  Keyword fallback also returned no results")
                 except Exception as e:
                     print(f"   ⚠️  Keyword fallback failed: {e}")
+                    # Ensure rollback on error
+                    try:
+                        self.generic_store.db_session.rollback()
+                    except:
+                        pass
             
             # Licensing fallback
             elif 'licens' in query_lower:  # Catches license/licence/licensing
@@ -741,6 +814,12 @@ class QueryAugmenter:
                     )
                     keyword_rows = keyword_result.fetchall()
                     
+                    # Explicitly close the result to free database resources
+                    keyword_result.close()
+                    
+                    # Commit the read transaction to release locks
+                    self.generic_store.db_session.commit()
+                    
                     if keyword_rows:
                         print(f"   ✅ Keyword fallback found {len(keyword_rows)} chunks")
                         # Format the keyword results the same way as vector search results
@@ -776,11 +855,400 @@ class QueryAugmenter:
                         print(f"   ⚠️  Keyword fallback also returned no results")
                 except Exception as e:
                     print(f"   ⚠️  Keyword fallback failed: {e}")
+                    # Ensure rollback on error
+                    try:
+                        self.generic_store.db_session.rollback()
+                    except:
+                        pass
+            
+            # Vendor disclosure/statement fallback
+            elif 'vendor disclosure' in query_lower or 'vendor statement' in query_lower or 'section 32' in query_lower:
+                print(f"   ⚠️  Vector search failed, trying keyword-based fallback for vendor disclosure query")
+                keyword_query = text("""
+                    SELECT 
+                        id,
+                        doc_category,
+                        chunk_index,
+                        content,
+                        metadata,
+                        0.5 as similarity
+                    FROM generic_knowledge
+                    WHERE 
+                        LOWER(content) LIKE '%section 32%' OR
+                        LOWER(content) LIKE '%vendor statement%' OR
+                        LOWER(content) LIKE '%vendor disclosure%' OR
+                        LOWER(content) LIKE '%statement of information%'
+                    ORDER BY 
+                        CASE 
+                            WHEN LOWER(content) LIKE '%section 32%' THEN 1
+                            WHEN LOWER(content) LIKE '%vendor statement%' THEN 2
+                            WHEN LOWER(content) LIKE '%vendor disclosure%' THEN 3
+                            ELSE 4
+                        END,
+                        chunk_index
+                    LIMIT :limit_count
+                """)
+                keyword_result = None
+                try:
+                    keyword_result = self.generic_store.db_session.execute(
+                        keyword_query, 
+                        {'limit_count': n_results}
+                    )
+                    keyword_rows = keyword_result.fetchall()
+                    
+                    # Explicitly close the result immediately after fetching
+                    keyword_result.close()
+                    keyword_result = None
+                    
+                    # Commit the read transaction immediately to release locks
+                    self.generic_store.db_session.commit()
+                    
+                    if keyword_rows:
+                        print(f"   ✅ Keyword fallback found {len(keyword_rows)} chunks for vendor disclosure")
+                        # Format the keyword results the same way as vector search results
+                        results = []
+                        for row in keyword_rows:
+                            # Handle metadata - it might be a dict or JSONB
+                            metadata = row[4]
+                            if hasattr(metadata, 'copy'):
+                                metadata = metadata.copy()
+                            elif isinstance(metadata, dict):
+                                metadata = metadata
+                            else:
+                                # Try to parse if it's a string
+                                try:
+                                    import json
+                                    if isinstance(metadata, str):
+                                        metadata = json.loads(metadata)
+                                    else:
+                                        metadata = {}
+                                except:
+                                    metadata = {}
+                            
+                            results.append({
+                                'id': str(row[0]),
+                                'doc_category': row[1],
+                                'chunk_index': row[2],
+                                'content': str(row[3]),
+                                'metadata': metadata,
+                                'similarity': 0.5  # Fixed similarity for keyword matches
+                            })
+                        print(f"   ✅ Formatted {len(results)} keyword results for vendor disclosure")
+                    else:
+                        print(f"   ⚠️  Keyword fallback also returned no results")
+                except Exception as e:
+                    print(f"   ⚠️  Keyword fallback failed: {e}")
+                    # Ensure rollback on error
+                    try:
+                        self.generic_store.db_session.rollback()
+                    except:
+                        pass
+                finally:
+                    # Always close result if it wasn't closed
+                    if keyword_result is not None:
+                        try:
+                            keyword_result.close()
+                        except:
+                            pass
+                    # Ensure transaction is committed or rolled back
+                    try:
+                        if hasattr(self.generic_store.db_session, 'in_transaction'):
+                            if self.generic_store.db_session.in_transaction():
+                                self.generic_store.db_session.rollback()
+                        elif hasattr(self.generic_store.db_session, 'is_active'):
+                            if self.generic_store.db_session.is_active:
+                                self.generic_store.db_session.rollback()
+                    except:
+                        pass
+            
+            # Process queries fallback (buying process, auction process)
+            elif 'buying process' in query_lower or 'purchase process' in query_lower or 'sale process' in query_lower:
+                print(f"   ⚠️  Vector search failed, trying keyword-based fallback for process query")
+                keyword_query = text("""
+                    SELECT 
+                        id,
+                        doc_category,
+                        chunk_index,
+                        content,
+                        metadata,
+                        0.5 as similarity
+                    FROM generic_knowledge
+                    WHERE 
+                        LOWER(content) LIKE '%buying process%' OR
+                        LOWER(content) LIKE '%purchase process%' OR
+                        LOWER(content) LIKE '%sale process%' OR
+                        LOWER(content) LIKE '%settlement process%' OR
+                        LOWER(content) LIKE '%conveyancing%'
+                    ORDER BY 
+                        CASE 
+                            WHEN LOWER(content) LIKE '%buying process%' THEN 1
+                            WHEN LOWER(content) LIKE '%purchase process%' THEN 2
+                            WHEN LOWER(content) LIKE '%sale process%' THEN 3
+                            WHEN LOWER(content) LIKE '%settlement%' THEN 4
+                            ELSE 5
+                        END,
+                        chunk_index
+                    LIMIT :limit_count
+                """)
+                keyword_result = None
+                try:
+                    keyword_result = self.generic_store.db_session.execute(
+                        keyword_query, 
+                        {'limit_count': n_results}
+                    )
+                    keyword_rows = keyword_result.fetchall()
+                    
+                    # Explicitly close the result immediately after fetching
+                    keyword_result.close()
+                    keyword_result = None
+                    
+                    # Commit the read transaction immediately to release locks
+                    self.generic_store.db_session.commit()
+                    
+                    if keyword_rows:
+                        print(f"   ✅ Keyword fallback found {len(keyword_rows)} chunks for process query")
+                        results = []
+                        for row in keyword_rows:
+                            metadata = row[4]
+                            if hasattr(metadata, 'copy'):
+                                metadata = metadata.copy()
+                            elif isinstance(metadata, dict):
+                                metadata = metadata
+                            else:
+                                try:
+                                    import json
+                                    if isinstance(metadata, str):
+                                        metadata = json.loads(metadata)
+                                    else:
+                                        metadata = {}
+                                except:
+                                    metadata = {}
+                            
+                            results.append({
+                                'id': str(row[0]),
+                                'doc_category': row[1],
+                                'chunk_index': row[2],
+                                'content': str(row[3]),
+                                'metadata': metadata,
+                                'similarity': 0.5
+                            })
+                        print(f"   ✅ Formatted {len(results)} keyword results for process query")
+                    else:
+                        print(f"   ⚠️  Keyword fallback also returned no results")
+                except Exception as e:
+                    print(f"   ⚠️  Keyword fallback failed: {e}")
+                    # Ensure rollback on error
+                    try:
+                        self.generic_store.db_session.rollback()
+                    except:
+                        pass
+            
+            # Auction process fallback
+            elif 'auction' in query_lower and ('process' in query_lower or 'work' in query_lower or 'function' in query_lower or 'how' in query_lower or 'explain' in query_lower):
+                print(f"   ⚠️  Vector search failed, trying keyword-based fallback for auction process query")
+                keyword_query = text("""
+                    SELECT 
+                        id,
+                        doc_category,
+                        chunk_index,
+                        content,
+                        metadata,
+                        0.5 as similarity
+                    FROM generic_knowledge
+                    WHERE 
+                        LOWER(content) LIKE '%auction rules%' OR
+                        LOWER(content) LIKE '%how auctions must be conducted%' OR
+                        LOWER(content) LIKE '%auction process%' OR
+                        LOWER(content) LIKE '%how auctions work%' OR
+                        LOWER(content) LIKE '%auction procedure%' OR
+                        LOWER(content) LIKE '%bidding process%' OR
+                        (LOWER(content) LIKE '%auction%' AND (LOWER(content) LIKE '%process%' OR LOWER(content) LIKE '%conduct%' OR LOWER(content) LIKE '%regulat%'))
+                    ORDER BY 
+                        CASE 
+                            WHEN LOWER(content) LIKE '%auction rules%' THEN 1
+                            WHEN LOWER(content) LIKE '%how auctions must be conducted%' THEN 2
+                            WHEN LOWER(content) LIKE '%auction process%' THEN 3
+                            WHEN LOWER(content) LIKE '%how auctions work%' THEN 4
+                            WHEN LOWER(content) LIKE '%auction procedure%' THEN 5
+                            ELSE 6
+                        END,
+                        chunk_index
+                    LIMIT :limit_count
+                """)
+                keyword_result = None
+                try:
+                    keyword_result = self.generic_store.db_session.execute(
+                        keyword_query, 
+                        {'limit_count': n_results}
+                    )
+                    keyword_rows = keyword_result.fetchall()
+                    
+                    # Explicitly close the result immediately after fetching
+                    keyword_result.close()
+                    keyword_result = None
+                    
+                    # Commit the read transaction immediately to release locks
+                    self.generic_store.db_session.commit()
+                    
+                    if keyword_rows:
+                        print(f"   ✅ Keyword fallback found {len(keyword_rows)} chunks for auction process")
+                        results = []
+                        for row in keyword_rows:
+                            metadata = row[4]
+                            if hasattr(metadata, 'copy'):
+                                metadata = metadata.copy()
+                            elif isinstance(metadata, dict):
+                                metadata = metadata
+                            else:
+                                try:
+                                    import json
+                                    if isinstance(metadata, str):
+                                        metadata = json.loads(metadata)
+                                    else:
+                                        metadata = {}
+                                except:
+                                    metadata = {}
+                            
+                            results.append({
+                                'id': str(row[0]),
+                                'doc_category': row[1],
+                                'chunk_index': row[2],
+                                'content': str(row[3]),
+                                'metadata': metadata,
+                                'similarity': 0.5
+                            })
+                        print(f"   ✅ Formatted {len(results)} keyword results for auction process")
+                    else:
+                        print(f"   ⚠️  Keyword fallback also returned no results")
+                except Exception as e:
+                    print(f"   ⚠️  Keyword fallback failed: {e}")
+                    # Ensure rollback on error
+                    try:
+                        self.generic_store.db_session.rollback()
+                    except:
+                        pass
+                finally:
+                    # Always close result if it wasn't closed
+                    if keyword_result is not None:
+                        try:
+                            keyword_result.close()
+                        except:
+                            pass
+                    # Ensure transaction is committed or rolled back
+                    try:
+                        if hasattr(self.generic_store.db_session, 'in_transaction'):
+                            if self.generic_store.db_session.in_transaction():
+                                self.generic_store.db_session.rollback()
+                        elif hasattr(self.generic_store.db_session, 'is_active'):
+                            if self.generic_store.db_session.is_active:
+                                self.generic_store.db_session.rollback()
+                    except:
+                        pass
+            
+            # Deposit handling fallback
+            elif 'deposit' in query_lower and ('handl' in query_lower or 'requirement' in query_lower or 'manage' in query_lower):
+                print(f"   ⚠️  Vector search failed, trying keyword-based fallback for deposit query")
+                keyword_query = text("""
+                    SELECT 
+                        id,
+                        doc_category,
+                        chunk_index,
+                        content,
+                        metadata,
+                        0.5 as similarity
+                    FROM generic_knowledge
+                    WHERE 
+                        LOWER(content) LIKE '%deposit%' AND
+                        (LOWER(content) LIKE '%handl%' OR
+                         LOWER(content) LIKE '%trust account%' OR
+                         LOWER(content) LIKE '%requirement%' OR
+                         LOWER(content) LIKE '%buyer deposit%')
+                    ORDER BY 
+                        CASE 
+                            WHEN LOWER(content) LIKE '%deposit handling%' THEN 1
+                            WHEN LOWER(content) LIKE '%trust account%' AND LOWER(content) LIKE '%deposit%' THEN 2
+                            WHEN LOWER(content) LIKE '%buyer deposit%' THEN 3
+                            ELSE 4
+                        END,
+                        chunk_index
+                    LIMIT :limit_count
+                """)
+                keyword_result = None
+                try:
+                    keyword_result = self.generic_store.db_session.execute(
+                        keyword_query, 
+                        {'limit_count': n_results}
+                    )
+                    keyword_rows = keyword_result.fetchall()
+                    
+                    # Explicitly close the result immediately after fetching
+                    keyword_result.close()
+                    keyword_result = None
+                    
+                    # Commit the read transaction immediately to release locks
+                    self.generic_store.db_session.commit()
+                    
+                    if keyword_rows:
+                        print(f"   ✅ Keyword fallback found {len(keyword_rows)} chunks for deposit query")
+                        results = []
+                        for row in keyword_rows:
+                            metadata = row[4]
+                            if hasattr(metadata, 'copy'):
+                                metadata = metadata.copy()
+                            elif isinstance(metadata, dict):
+                                metadata = metadata
+                            else:
+                                try:
+                                    import json
+                                    if isinstance(metadata, str):
+                                        metadata = json.loads(metadata)
+                                    else:
+                                        metadata = {}
+                                except:
+                                    metadata = {}
+                            
+                            results.append({
+                                'id': str(row[0]),
+                                'doc_category': row[1],
+                                'chunk_index': row[2],
+                                'content': str(row[3]),
+                                'metadata': metadata,
+                                'similarity': 0.5
+                            })
+                        print(f"   ✅ Formatted {len(results)} keyword results for deposit query")
+                    else:
+                        print(f"   ⚠️  Keyword fallback also returned no results")
+                except Exception as e:
+                    print(f"   ⚠️  Keyword fallback failed: {e}")
+                    # Ensure rollback on error
+                    try:
+                        self.generic_store.db_session.rollback()
+                    except:
+                        pass
+                finally:
+                    # Always close result if it wasn't closed
+                    if keyword_result is not None:
+                        try:
+                            keyword_result.close()
+                        except:
+                            pass
+                    # Ensure transaction is committed or rolled back
+                    try:
+                        if hasattr(self.generic_store.db_session, 'in_transaction'):
+                            if self.generic_store.db_session.in_transaction():
+                                self.generic_store.db_session.rollback()
+                        elif hasattr(self.generic_store.db_session, 'is_active'):
+                            if self.generic_store.db_session.is_active:
+                                self.generic_store.db_session.rollback()
+                    except:
+                        pass
             
             if not results:
-                return ("",  # Empty context string to indicate no results
-                       [],  # Empty data sources
-                       None)
+                return (
+                    "",  # Empty context string to indicate no results
+                    [],  # Empty data sources
+                    None
+                )
         
         print(f"✅ Found {len(results)} results from generic knowledge store")
         

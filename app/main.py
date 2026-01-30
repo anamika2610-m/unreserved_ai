@@ -18,6 +18,7 @@ from app.api.v1.routes.sync import router as sync_router
 from app.api.v1.routes.voice import router as voice_router
 from app.api.v1.routes.voice_realtime import router as voice_realtime_router
 from app.api.v1.routes.health import router as health_router
+from app.api.v1.routes.admin import router as admin_router
 
 # Application metadata
 API_VERSION = "1.0.0"
@@ -50,6 +51,7 @@ app.add_middleware(
 app.include_router(chat_router)
 app.include_router(sync_router)
 app.include_router(voice_router)
+app.include_router(admin_router)  # Admin endpoints (property summaries, etc.)
 
 # Voice realtime router (WebSocket) - disabled by default
 # To enable: Set ENABLE_VOICE_REALTIME=true in .env file
@@ -85,6 +87,8 @@ async def root():
             "sync_property_pdfs": "/api/v1/sync/property-pdfs",
             "sync_generic_pdfs": "/api/v1/sync/generic-pdfs",
             "sync_status": "/api/v1/sync/status",
+            "admin_listing_summary": "/api/v1/admin/listings/{listing_id}/summary",
+            "admin_summaries_generate": "/api/v1/admin/summaries/generate",
             "docs": "/docs",
             "redoc": "/redoc"
         }
