@@ -116,6 +116,7 @@ class ResponseGenerator:
         user_id: Optional[str] = None,
         n_retrieval_results: int = 8,
         conversation_history: Optional[List[Dict[str, str]]] = None,
+        is_enquiry_message: bool = False,
     ) -> Dict[str, Any]:
 
         # 1.5️⃣ Rewrite "yes" responses to explicit questions about suggested topics
@@ -275,12 +276,15 @@ class ResponseGenerator:
                 print("⚠️  Generic query returned no results → providing fallback message")
                 print(f"   Debug: generic_data_sources={len(generic_data_sources) if generic_data_sources else 0}, context_length={len(generic_context) if generic_context else 0}")
                 
-                answer = (
-                    "I don't have detailed information on that topic in my knowledge base. "
-                    "For specific questions about real estate law, licensing, or processes in Victoria, "
-                    "I recommend consulting with a qualified professional such as a lawyer, "
-                    "licensed real estate agent, or Consumer Affairs Victoria (CAV)."
-                )
+                if is_enquiry_message:
+                    answer = "I don't have this information now, will get back to you shortly."
+                else:
+                    answer = (
+                        "I don't have detailed information on that topic in my knowledge base. "
+                        "For specific questions about real estate law, licensing, or processes in Victoria, "
+                        "I recommend consulting with a qualified professional such as a lawyer, "
+                        "licensed real estate agent, or Consumer Affairs Victoria (CAV)."
+                    )
                 
                 return self._create_response_dict(
                     answer=answer,
@@ -584,7 +588,7 @@ class ResponseGenerator:
                 if not (generic_data_sources and generic_context and generic_context.strip()):
                     print("⚠️  Step 4/4: All data sources insufficient → escalating to vendor")
                     fallback_reason = insufficiency_reason if insufficiency_reason else "Insufficient information in property JSON, property PDFs, and no relevant generic knowledge found"
-                    answer = self._generate_vendor_contact_message(query, fallback_reason)
+                    answer = self._generate_vendor_contact_message(query, fallback_reason, is_enquiry_message)
                     
                     # Combine all attempted data sources for logging
                     all_data_sources = property_json_data_sources + property_pdf_data_sources
@@ -623,13 +627,16 @@ class ResponseGenerator:
         if (not context or not data_sources) and not has_location_data:
             # Final fallback - no data from either source
             print("⚠️  No data found in property or generic stores → providing fallback message")
-            answer = (
-                "I don't have detailed information on that topic. "
-                "For property-specific questions, please contact the vendor or listing agent. "
-                "For questions about real estate law, licensing, or processes in Victoria, "
-                "I recommend consulting with a qualified professional such as a lawyer, "
-                "licensed real estate agent, or Consumer Affairs Victoria (CAV)."
-            )
+            if is_enquiry_message:
+                answer = "I don't have this information now, will get back to you shortly."
+            else:
+                answer = (
+                    "I don't have detailed information on that topic. "
+                    "For property-specific questions, please contact the vendor or listing agent. "
+                    "For questions about real estate law, licensing, or processes in Victoria, "
+                    "I recommend consulting with a qualified professional such as a lawyer, "
+                    "licensed real estate agent, or Consumer Affairs Victoria (CAV)."
+                )
             
             ai_response = sanitize_response(
                 AIResponse(
@@ -801,7 +808,9 @@ class ResponseGenerator:
         # 🏫 For "nearby schools" queries, extract school names (and any explicit distances)
         # from the listing context and prepend a short structured block.
         # This prevents the LLM from mentioning only one school when multiple are present in PDFs.
-        if context and is_amenity_query(query):
+        # IMPORTANT: Only extract schools from PROPERTY-SPECIFIC context, not from generic knowledge.
+        # Generic knowledge might contain schools from anywhere, not specific to this property location.
+        if context and is_amenity_query(query) and query_source == 'property':
             ql = query.lower()
             if "school" in ql or "schools" in ql:
                 school_lines = self._extract_school_lines_from_context(context)
@@ -1145,12 +1154,17 @@ class ResponseGenerator:
         )
 
     def _generate_vendor_contact_message(
-        self, query: str, reason: Optional[str] = None
+        self, query: str, reason: Optional[str] = None, is_enquiry_message: bool = False
     ) -> str:
         # IMPORTANT (privacy/UX): never surface internal retrieval reasons to end users.
         # The `reason` is kept for logging/diagnostics via `escalation_reason`, but must
         # not appear in the user-facing answer.
         _ = reason  # explicitly unused
+        
+        # Use enquiry-specific message for enquiry messages
+        if is_enquiry_message:
+            return "I don't have this information now, will get back to you shortly."
+        
         return (
             "I don't have sufficient information in the available listing data "
             "to answer this fully.\n\n"

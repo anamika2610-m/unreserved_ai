@@ -12,7 +12,7 @@ os.environ.setdefault("CHROMA_TELEMETRY_DISABLED", "1")
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.rag_pipeline.retrieval import PropertyRetriever
+from app.services.rag_pipeline.retrieval import PropertyRetriever
 
 
 def main():

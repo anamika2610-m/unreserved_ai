@@ -1246,7 +1246,7 @@ class QueryAugmenter:
             if not results:
                 return (
                     "",  # Empty context string to indicate no results
-                    [],  # Empty data sources
+                   [],  # Empty data sources
                     None
                 )
         
