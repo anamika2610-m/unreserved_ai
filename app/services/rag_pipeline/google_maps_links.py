@@ -305,9 +305,18 @@ def is_invalid_amenity_query(query: str) -> bool:
     """
     query_lower = query.lower()
     
-    has_location = any(indicator in query_lower for indicator in INVALID_QUERY_LOCATION_INDICATORS)
+    # CRITICAL: Only trigger if query is clearly asking about nearby/location-based things
+    # Avoid false positives on queries like "how many people are interested" or "are there offers"
+    # Must have strong location/nearby indicators, not just "are" or "is"
+    strong_location_indicators = [
+        'nearby', 'near', 'close', 'around', 'surrounding',
+        'are there any', 'are there nearby', 'is there any', 'is there a',
+        'any nearby', 'close to', 'near the', 'around the'
+    ]
     
-    if not has_location:
+    has_strong_location = any(indicator in query_lower for indicator in strong_location_indicators)
+    
+    if not has_strong_location:
         return False
     
     # Check if query has location indicator but mentions invalid terms

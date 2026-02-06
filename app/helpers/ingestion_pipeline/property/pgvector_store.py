@@ -453,9 +453,32 @@ class PgVectorStore:
         Returns:
             List of all chunks for the listing
         """
-        embeddings = self.db_session.query(PropertyEmbedding).filter(
-            PropertyEmbedding.listing_id == str(listing_id)
-        ).order_by(PropertyEmbedding.chunk_index).all()
+        embeddings = []
+        try:
+            embeddings = (
+                self.db_session.query(PropertyEmbedding)
+                .filter(PropertyEmbedding.listing_id == str(listing_id))
+                .order_by(PropertyEmbedding.chunk_index)
+                .all()
+            )
+            # Explicitly end the read-only transaction
+            self.db_session.commit()
+        except Exception:
+            try:
+                self.db_session.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            # Safety net: ensure no transaction is left open (prevents idle in transaction)
+            try:
+                if hasattr(self.db_session, "in_transaction"):
+                    if self.db_session.in_transaction():
+                        self.db_session.rollback()
+                elif hasattr(self.db_session, "is_active") and self.db_session.is_active:
+                    self.db_session.rollback()
+            except Exception:
+                pass
         
         return [
             {
@@ -479,9 +502,29 @@ class PgVectorStore:
         Returns:
             Dictionary with latitude, longitude, and address, or None if not found
         """
-        embedding = self.db_session.query(PropertyEmbedding).filter(
-            PropertyEmbedding.listing_id == str(listing_id)
-        ).first()
+        embedding = None
+        try:
+            embedding = (
+                self.db_session.query(PropertyEmbedding)
+                .filter(PropertyEmbedding.listing_id == str(listing_id))
+                .first()
+            )
+            self.db_session.commit()
+        except Exception:
+            try:
+                self.db_session.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                if hasattr(self.db_session, "in_transaction"):
+                    if self.db_session.in_transaction():
+                        self.db_session.rollback()
+                elif hasattr(self.db_session, "is_active") and self.db_session.is_active:
+                    self.db_session.rollback()
+            except Exception:
+                pass
         
         if not embedding or not embedding.chunk_metadata:
             return None
@@ -509,7 +552,25 @@ class PgVectorStore:
         Returns:
             Dictionary with 'ids', 'documents', and 'metadatas' keys
         """
-        embeddings = self.db_session.query(PropertyEmbedding).all()
+        embeddings = []
+        try:
+            embeddings = self.db_session.query(PropertyEmbedding).all()
+            self.db_session.commit()
+        except Exception:
+            try:
+                self.db_session.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                if hasattr(self.db_session, "in_transaction"):
+                    if self.db_session.in_transaction():
+                        self.db_session.rollback()
+                elif hasattr(self.db_session, "is_active") and self.db_session.is_active:
+                    self.db_session.rollback()
+            except Exception:
+                pass
         
         return {
             'ids': [emb.id for emb in embeddings],
@@ -552,20 +613,41 @@ class PgVectorStore:
         Returns:
             Dictionary with stats
         """
-        total_chunks = self.db_session.query(PropertyEmbedding).count()
-        
-        unique_listings = self.db_session.execute(
-            text("SELECT COUNT(DISTINCT listing_id) FROM property_embeddings")
-        ).scalar()
-        
-        chunk_type_counts = self.db_session.execute(
-            text("""
-                SELECT chunk_type, COUNT(*) as count
-                FROM property_embeddings
-                GROUP BY chunk_type
-                ORDER BY count DESC
-            """)
-        ).fetchall()
+        total_chunks = 0
+        unique_listings = 0
+        chunk_type_counts = []
+        try:
+            total_chunks = self.db_session.query(PropertyEmbedding).count()
+            
+            unique_listings = self.db_session.execute(
+                text("SELECT COUNT(DISTINCT listing_id) FROM property_embeddings")
+            ).scalar()
+            
+            chunk_type_counts = self.db_session.execute(
+                text("""
+                    SELECT chunk_type, COUNT(*) as count
+                    FROM property_embeddings
+                    GROUP BY chunk_type
+                    ORDER BY count DESC
+                """)
+            ).fetchall()
+            
+            self.db_session.commit()
+        except Exception:
+            try:
+                self.db_session.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                if hasattr(self.db_session, "in_transaction"):
+                    if self.db_session.in_transaction():
+                        self.db_session.rollback()
+                elif hasattr(self.db_session, "is_active") and self.db_session.is_active:
+                    self.db_session.rollback()
+            except Exception:
+                pass
         
         return {
             'total_chunks': total_chunks,

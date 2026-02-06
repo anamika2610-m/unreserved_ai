@@ -641,18 +641,19 @@ def detect_enquiry_type(query: str) -> str:
     # CRITICAL: Detect personal advice questions FIRST (highest priority)
     # These require human expertise and should NOT be answered by AI
     personal_advice_keywords = [
-        'should i buy', 'should i purchase', 'should i invest',
-        'at what price should i', 'what price should i',
-        'should i offer', 'how much should i pay',
-        'should i act', 'should i make a move', 'should i proceed',
-        'is this a good deal', 'is this worth', 'is it worth',
+        'should i buy', 'should i purchase', 'should i invest', 'should i get',
+        'at what price should i', 'what price should i', 'what should i pay',
+        'should i offer', 'how much should i pay', 'should i bid',
+        'should i act', 'should i make a move', 'should i proceed', 'should i go ahead',
+        'is this a good deal', 'is this worth', 'is it worth', 'worth buying',
         'can i negotiate', 'chance for negotiation', 'any room for negotiation',
         'is there room for negotiation', 'room to negotiate', 'negotiate the price',
         'open to negotiation', 'is the price negotiable', 'price fixed or',
         'can i bargain', 'should i negotiate', 'any negotiation',
-        'is this overpriced', 'is this underpriced',
-        'should i go for this', 'is this a good investment',
-        'what should my offer be', 'what should my bid be'
+        'is this overpriced', 'is this underpriced', 'is this price good',
+        'should i go for this', 'is this a good investment', 'good investment',
+        'what should my offer be', 'what should my bid be', 'recommend buying',
+        'would you recommend', 'do you recommend', 'should i consider'
     ]
     
     # Check personal advice FIRST (before other keywords)
@@ -668,6 +669,14 @@ def detect_enquiry_type(query: str) -> str:
     specs_keywords = ['bedroom', 'bathroom', 'garage', 'area', 'feature', 'amenity', 'pool']
     location_keywords = ['location', 'address', 'where', 'suburb', 'city', 'inspection']
     
+    # Buyer interest/activity keywords (for tone/activity queries)
+    interest_keywords = [
+        'how many people', 'people interested', 'buyer interest', 'interest level',
+        'how much interest', 'market interest', 'competition', 'competing',
+        'how many offers', 'number of offers', 'offer situation', 'offers received',
+        'how many bids', 'bidding activity', 'auction activity'
+    ]
+    
     # Only trigger bidding advice for actual "how to" questions
     # NOT for informational queries like "what are the offers" or "what is the auction"
     bidding_advice_keywords = ['how to bid', 'how do i bid', 'how to make an offer', 
@@ -679,6 +688,8 @@ def detect_enquiry_type(query: str) -> str:
         return 'specifications'
     elif any(kw in query_lower for kw in location_keywords):
         return 'location'
+    elif any(kw in query_lower for kw in interest_keywords):
+        return 'general'  # Treat buyer interest queries as general (will use tone/activity context)
     elif any(kw in query_lower for kw in bidding_advice_keywords):
         return 'bidding'
     else:

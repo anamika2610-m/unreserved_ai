@@ -13,8 +13,10 @@ from app.services.rag_pipeline.llms import (
 from app.services.rag_pipeline.prompts import (
     SYSTEM_PROMPT,
     GENERIC_SYSTEM_PROMPT,
+    ENQUIRY_EMAIL_SYSTEM_PROMPT,
     create_user_prompt,
     create_bid_advice_prompt,
+    create_enquiry_email_user_prompt,
 )
 from app.schemas import AIResponse, EnquiryLog
 from app.services.rag_pipeline.augmentation import QueryAugmenter
@@ -25,6 +27,7 @@ from app.services.rag_pipeline.google_maps_links import (
     is_amenity_query,
     is_invalid_amenity_query,
 )
+from app.services.tone_adaptation_service import ToneAdaptationService, ToneLevel
 
 # Constants
 CONVERSATIONAL_PHRASES = [
@@ -69,6 +72,7 @@ class ResponseGenerator:
         self.augmenter = augmenter or QueryAugmenter()
         self.model_config = get_model_config()
         self.model_name = get_model_name()
+        self.tone_service = ToneAdaptationService()
     
     # ------------------------------------------------------------------
     # 🔒 LLM ERROR CLASSIFIER (CRITICAL)
@@ -277,7 +281,10 @@ class ResponseGenerator:
                 print(f"   Debug: generic_data_sources={len(generic_data_sources) if generic_data_sources else 0}, context_length={len(generic_context) if generic_context else 0}")
                 
                 if is_enquiry_message:
-                    answer = "I don't have this information now, will get back to you shortly."
+                    answer = (
+                        "This is an automated email. We don't have enough information to answer this enquiry "
+                        "right now, but we will get back to you shortly."
+                    )
                 else:
                     answer = (
                         "I don't have detailed information on that topic in my knowledge base. "
@@ -628,7 +635,10 @@ class ResponseGenerator:
             # Final fallback - no data from either source
             print("⚠️  No data found in property or generic stores → providing fallback message")
             if is_enquiry_message:
-                answer = "I don't have this information now, will get back to you shortly."
+                answer = (
+                    "This is an automated email. We don't have enough information to answer this enquiry "
+                    "right now, but we will get back to you shortly."
+                )
             else:
                 answer = (
                     "I don't have detailed information on that topic. "
@@ -719,7 +729,44 @@ class ResponseGenerator:
                 user_id=user_id,
             )
         
-        # 5️⃣ Check if this is an amenity query (to pass has_amenity_links flag)
+        # 5️⃣ Get listing activity metrics for tone adaptation
+        listing_activity_data = None
+        tone_level = ToneLevel.NEUTRAL
+        tone_context = ""
+        
+        if listing_id:
+            try:
+                from app.db.session import SessionLocal
+                from app.db.postgres.repositories.listing_activity_repository import ListingActivityRepository
+                
+                db_session = SessionLocal()
+                try:
+                    activity_repo = ListingActivityRepository(db_session)
+                    listing_activity_data = activity_repo.get_activity_dict(listing_id)
+                    
+                    if listing_activity_data:
+                        print(f"🎭 Fetching tone adaptation for listing {listing_id}")
+                        print(f"   Activity metrics: enquiries={listing_activity_data.get('enquiries_7d', 0)}, "
+                              f"offers={listing_activity_data.get('genuine_offers_7d', 0)}, "
+                              f"contracts={listing_activity_data.get('contract_requests_7d', 0)}")
+                        
+                        tone_level, tone_context = self.tone_service.determine_tone(listing_activity_data)
+                        
+                        if tone_level != ToneLevel.NEUTRAL:
+                            print(f"🎭 Tone adaptation: {tone_level.value.upper()}")
+                            print(f"   Context: {tone_context[:150]}...")
+                        else:
+                            print(f"🎭 Tone adaptation: NEUTRAL (no special conditions met)")
+                    else:
+                        print(f"🎭 No activity data found for listing {listing_id} → using NEUTRAL tone")
+                finally:
+                    db_session.close()
+            except Exception as e:
+                print(f"⚠️  Failed to get listing activity metrics: {type(e).__name__}: {e}")
+                import traceback
+                print(traceback.format_exc())
+        
+        # 5.5️⃣ Check if this is an amenity query (to pass has_amenity_links flag)
         # We need to check this BEFORE creating the prompt so the LLM knows to mention the link
         # IMPORTANT: For pure pricing questions, we do NOT want amenity links at all.
         # IMPORTANT: For generic knowledge queries, we do NOT want amenity links at all.
@@ -820,6 +867,27 @@ class ResponseGenerator:
                     ) + "\n"
                     context = schools_block + "\n" + context
         
+        # 5.75️⃣ Inject tone adaptation context
+        # IMPORTANT: Only inject tone / market-activity context for PROPERTY-SPECIFIC queries.
+        # For GENERIC knowledge questions (laws, processes, etc.) we must not bias the answer
+        # with listing-level activity.
+        if query_source == 'property' and tone_level != ToneLevel.NEUTRAL and tone_context:
+            tone_prompt_context = self.tone_service.format_tone_context_for_prompt(
+                tone_level, tone_context
+            )
+            # Prepend tone context to the main context
+            context = tone_prompt_context + "\n\n" + context
+            print(
+                f"🎭 ✅ Injected {tone_level.value.upper()} tone context into PROPERTY prompt "
+                f"({len(tone_prompt_context)} chars)"
+            )
+            print(f"   Tone instruction preview: {tone_prompt_context[:200]}...")
+        else:
+            print(
+                f"🎭 No tone adaptation applied "
+                f"(source={query_source}, tone_level={tone_level.value}, has_context={bool(tone_context)})"
+            )
+        
         # 6️⃣ Prompt creation
         # DEBUG: Log context before prompt creation
         print(f"\n🔍 DEBUG: Before LLM call:")
@@ -832,23 +900,48 @@ class ResponseGenerator:
         else:
             print(f"   ⚠️  WARNING: Context is EMPTY!")
         
-        # Use different system prompts and user prompts for generic vs property queries
+        # Use different system prompts and user prompts for generic vs property queries.
+        # Additionally, enquiry messages use a separate, formal email-style prompt.
         if query_source == 'generic':
             from app.services.rag_pipeline.prompts import create_generic_user_prompt
-            system_prompt = GENERIC_SYSTEM_PROMPT
-            user_prompt = create_generic_user_prompt(query, context, conversation_history=conversation_history)
-        else:
-            system_prompt = SYSTEM_PROMPT
-            if enquiry_type == "bidding":
-                user_prompt = create_bid_advice_prompt(query, context, conversation_history=conversation_history)
-            else:
-                user_prompt = create_user_prompt(
-                    query, 
-                    context, 
-                    has_amenity_links=has_amenity_links_flag, 
-                    amenity_links_list=pre_generated_amenity_links if has_amenity_links_flag else None,
-                    conversation_history=conversation_history
+            if is_enquiry_message:
+                system_prompt = ENQUIRY_EMAIL_SYSTEM_PROMPT
+                user_prompt = create_enquiry_email_user_prompt(
+                    query=query,
+                    context=context or "",
+                    is_property_query=False,
+                    conversation_history=conversation_history,
                 )
+            else:
+                system_prompt = GENERIC_SYSTEM_PROMPT
+                user_prompt = create_generic_user_prompt(
+                    query, context, conversation_history=conversation_history
+                )
+        else:
+            if is_enquiry_message:
+                system_prompt = ENQUIRY_EMAIL_SYSTEM_PROMPT
+                user_prompt = create_enquiry_email_user_prompt(
+                    query=query,
+                    context=context or "",
+                    is_property_query=True,
+                    conversation_history=conversation_history,
+                )
+            else:
+                system_prompt = SYSTEM_PROMPT
+                if enquiry_type == "bidding":
+                    user_prompt = create_bid_advice_prompt(
+                        query, context, conversation_history=conversation_history
+                    )
+                else:
+                    user_prompt = create_user_prompt(
+                        query,
+                        context,
+                        has_amenity_links=has_amenity_links_flag,
+                        amenity_links_list=pre_generated_amenity_links
+                        if has_amenity_links_flag
+                        else None,
+                        conversation_history=conversation_history,
+                    )
         
         print(f"   User prompt length: {len(user_prompt)} chars")
         print(f"   User prompt preview (first 500 chars): {user_prompt[:500]}...")
@@ -1148,9 +1241,11 @@ class ResponseGenerator:
 
     def _generate_personal_advice_message(self, query: str) -> str:
         return (
-            "I'm not able to provide personalized advice on pricing, negotiation, "
-            "or investment decisions. These require assessment by qualified professionals.\n\n"
-            "I can help with factual details about the property instead."
+            "I cannot provide personal advice, recommendations, or suggestions about whether to buy, "
+            "purchase, invest in, or make offers on properties. These decisions require assessment by "
+            "qualified professionals such as lawyers, financial advisors, or licensed real estate agents.\n\n"
+            "I can help with factual details about the property instead, such as specifications, "
+            "pricing information, location details, and property features."
         )
 
     def _generate_vendor_contact_message(
@@ -1163,7 +1258,10 @@ class ResponseGenerator:
         
         # Use enquiry-specific message for enquiry messages
         if is_enquiry_message:
-            return "I don't have this information now, will get back to you shortly."
+            return (
+                "This is an automated email. We don't have enough information to answer this enquiry "
+                "right now, but we will get back to you shortly."
+            )
         
         return (
             "I don't have sufficient information in the available listing data "
