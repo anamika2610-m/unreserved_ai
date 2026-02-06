@@ -198,15 +198,16 @@ for property listings. Your summaries should:
 2. Identify DESIRED FEATURES that buyers are looking for (what they want, need, prefer)
 3. Highlight trends and patterns in buyer interest
 4. Provide insights about what features buyers care most about
-5. Be concise and actionable for property administrators
+5. Be concise, informative, and directly to the point
 6. NEVER mention specific user IDs or individual conversations
 7. Focus on aggregate patterns and trends, especially property features and desired features
+8. Avoid repeating the same idea in different words; each insight should appear once
 
-Generate a professional, informative summary that helps administrators understand 
-what property features buyers are interested in and what they're looking for."""
+Generate a professional, medium-length summary (roughly 120–200 words) that helps administrators
+quickly understand what property features buyers are interested in and what they're looking for."""
 
         user_prompt = f"""Based on the following conversation analysis for a property listing, 
-generate a comprehensive summary that identifies buyer interest patterns and common themes.
+generate a concise but informative summary that identifies buyer interest patterns and common themes.
 
 {context}
 
@@ -215,10 +216,11 @@ Generate a summary that:
 - Identifies DESIRED FEATURES buyers are looking for (what they want, need, prefer)
 - Highlights trends in buyer interest patterns related to property features
 - Provides insights about which features buyers care most about
-- Suggests what property information might be missing or needs clarification
+- Notes what property information might be missing or needs clarification, if any
 - Is written in a professional, administrative tone
 
-Keep the summary to 3-4 paragraphs maximum. Focus on property features and desired features."""
+Keep the summary to 1–2 short paragraphs (roughly 120–200 words).
+Avoid repeating the same information in different wording."""
 
         try:
             messages = [
@@ -333,27 +335,22 @@ Keep the summary to 3-4 paragraphs maximum. Focus on property features and desir
         """
         total = analysis["total_queries"]
         categories = analysis.get("query_categories", {})
-        
+
         summary_parts = [
-            f"This property listing has received {total} user queries.",
+            f"{total} user queries have been recorded for this listing.",
         ]
-        
+
         if categories:
             top_category = max(categories.items(), key=lambda x: x[1])
             summary_parts.append(
                 f"The most common topic is {top_category[0]} with {top_category[1]} queries."
             )
-        
+
         if analysis.get("frequent_questions"):
             top_q = analysis["frequent_questions"][0]
             summary_parts.append(
-                f"The most frequently asked question pattern is: '{top_q['pattern']}' "
+                f"The most frequently asked question pattern is '{top_q['pattern']}' "
                 f"(asked {top_q['count']} times)."
             )
-        
-        summary_parts.append(
-            "This indicates active buyer interest. Consider ensuring all property "
-            "information is up-to-date and easily accessible."
-        )
-        
+
         return " ".join(summary_parts)

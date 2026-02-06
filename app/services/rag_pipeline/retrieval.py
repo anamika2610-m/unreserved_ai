@@ -446,7 +446,7 @@ class PropertyRetriever:
         print(f"   listing_id={listing_id}")
         print(f"   chunk_types={chunk_types}")
         print(f"   allow_hybrid={allow_hybrid}")
-        
+
         results = self.vector_store.search(
             query=query,
             n_results=n_results,

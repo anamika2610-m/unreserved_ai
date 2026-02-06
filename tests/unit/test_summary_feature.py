@@ -10,7 +10,12 @@ Tests:
 """
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../")
+)
+sys.path.insert(0, PROJECT_ROOT)
+
 
 from app.db.session import SessionLocal
 from app.db.postgres.repositories.conversation_repository import ConversationRepository

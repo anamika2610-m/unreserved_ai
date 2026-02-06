@@ -16,9 +16,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.routes.chat import router as chat_router
 from app.api.v1.routes.sync import router as sync_router
 from app.api.v1.routes.voice import router as voice_router
-from app.api.v1.routes.voice_realtime import router as voice_realtime_router
+# from app.api.v1.routes.voice_realtime import router as voice_realtime_router
 from app.api.v1.routes.health import router as health_router
 from app.api.v1.routes.admin import router as admin_router
+from app.api.v1.routes.activity import router as activity_router
 
 # Application metadata
 API_VERSION = "1.0.0"
@@ -52,6 +53,7 @@ app.include_router(chat_router)
 app.include_router(sync_router)
 app.include_router(voice_router)
 app.include_router(admin_router)  # Admin endpoints (property summaries, etc.)
+app.include_router(activity_router)  # Activity tracking endpoints (tone adaptation)
 
 # Voice realtime router (WebSocket) - disabled by default
 # To enable: Set ENABLE_VOICE_REALTIME=true in .env file

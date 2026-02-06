@@ -58,6 +58,10 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[UUID] = Field(
         None, description="Existing conversation ID (UUID)"
     )
+    
+    source: Optional[str] = Field(
+        None, description="Source of the message. Use 'enquiry' for enquiry form messages. If user_id is null and source is 'enquiry', it will be treated as an enquiry message."
+    )
 
     class Config:
         json_schema_extra = {
@@ -106,15 +110,28 @@ async def chat_message(
         # ----------------------------------------------------------
         user_id = request.user_id
         listing_id = request.listing_id
+        source_param = request.source
         
         # ----------------------------------------------------------
-        # Conversation history (only if user_id is provided)
+        # Detect if this is an enquiry message
+        # Enquiry messages: user_id is null/empty AND source is 'enquiry'
+        # ----------------------------------------------------------
+        is_enquiry_message = (
+            (user_id is None or user_id == "") and 
+            source_param and source_param.lower() == "enquiry"
+        )
+        
+        if is_enquiry_message:
+            print("📧 Enquiry message detected - no conversation history, will use enquiry-specific fallback")
+        
+        # ----------------------------------------------------------
+        # Conversation history (only if user_id is provided AND not an enquiry message)
         # ----------------------------------------------------------
         conversation = None
         conversation_history = []
         conversation_repo = ConversationRepository(db)
         
-        if user_id:
+        if user_id and not is_enquiry_message:
             # Logged-in user: Get or create conversation and fetch history
             conversation = conversation_repo.get_or_create_conversation(
                 user_id=user_id,
@@ -145,8 +162,11 @@ async def chat_message(
                 },
             )
         else:
-            # Anonymous user: No conversation history
-            print("🔓 Anonymous user - no conversation history will be saved")
+            # Anonymous user or enquiry message: No conversation history
+            if is_enquiry_message:
+                print("📧 Enquiry message - no conversation history will be saved")
+            else:
+                print("🔓 Anonymous user - no conversation history will be saved")
             source = detect_query_source(request.question, conversation_history=[])
             is_generic_query = (source == "generic")
 
@@ -183,6 +203,7 @@ async def chat_message(
             listing_id=final_listing_id_str,  # None for generic/conversational, UUID string for property-specific
             user_id=final_user_id,  # Always set (UUID string or None)
             conversation_history=conversation_history,
+            is_enquiry_message=is_enquiry_message,  # Pass enquiry flag
         )
 
         ai_response = result["ai_response"]

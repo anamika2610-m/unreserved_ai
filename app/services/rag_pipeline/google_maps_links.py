@@ -170,7 +170,11 @@ AMENITY_TYPES = {
 
 def _build_google_maps_url(search_query: str, latitude: float, longitude: float, zoom: int) -> str:
     """
-    Build a Google Maps search URL.
+    Build a Google Maps search URL that forces search near the specified coordinates.
+    
+    Uses a format that explicitly centers the search at the property location.
+    The coordinates are embedded in the search query itself to force Google Maps
+    to search at that location rather than using the user's current location.
     
     Args:
         search_query: URL-encoded search query
@@ -179,9 +183,14 @@ def _build_google_maps_url(search_query: str, latitude: float, longitude: float,
         zoom: Map zoom level
         
     Returns:
-        Google Maps search URL
+        Google Maps search URL that forces search at the specified coordinates
     """
-    return f"{GOOGLE_MAPS_BASE_URL}/{search_query}/@{latitude},{longitude},{zoom}z"
+    # Format: /search/query+near+lat,lng/@lat,lng,zoomz
+    # Embedding coordinates in both the search query ("near lat,lng") and as map center (@lat,lng)
+    # This dual approach helps force Google Maps to use the property location
+    # rather than the user's current location
+    search_with_location = f"{search_query}+near+{latitude},{longitude}"
+    return f"{GOOGLE_MAPS_BASE_URL}/{search_with_location}/@{latitude},{longitude},{zoom}z"
 
 
 def generate_google_maps_link(
@@ -296,9 +305,18 @@ def is_invalid_amenity_query(query: str) -> bool:
     """
     query_lower = query.lower()
     
-    has_location = any(indicator in query_lower for indicator in INVALID_QUERY_LOCATION_INDICATORS)
+    # CRITICAL: Only trigger if query is clearly asking about nearby/location-based things
+    # Avoid false positives on queries like "how many people are interested" or "are there offers"
+    # Must have strong location/nearby indicators, not just "are" or "is"
+    strong_location_indicators = [
+        'nearby', 'near', 'close', 'around', 'surrounding',
+        'are there any', 'are there nearby', 'is there any', 'is there a',
+        'any nearby', 'close to', 'near the', 'around the'
+    ]
     
-    if not has_location:
+    has_strong_location = any(indicator in query_lower for indicator in strong_location_indicators)
+    
+    if not has_strong_location:
         return False
     
     # Check if query has location indicator but mentions invalid terms
