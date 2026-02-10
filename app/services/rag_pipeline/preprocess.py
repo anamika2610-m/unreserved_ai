@@ -420,6 +420,39 @@ def _is_obviously_property(query_lower: str) -> bool:
         if re.search(pattern, query_lower):
             return True
     
+    # Single-word or simple property attribute queries (with or without question mark)
+    # These are clearly asking about specific property specs/details
+    property_attribute_keywords = [
+        'bedroom', 'bedrooms', 'bathroom', 'bathrooms', 'garage', 'garages',
+        'parking', 'car spaces', 'land size', 'floor size', 'lot size',
+        'zoning', 'zone', 'title', 'construction', 'built', 'year built',
+        'storey', 'storeys', 'level', 'levels', 'orientation', 'aspect',
+        'heating', 'cooling', 'aircon', 'air conditioning', 'ducted',
+        'pool', 'swimming pool', 'spa', 'tennis court', 'shed', 'workshop',
+        'balcony', 'deck', 'patio', 'courtyard', 'backyard', 'frontyard',
+        'solar', 'solar panels', 'water tank', 'greywater', 'rainwater',
+        'insulation', 'double glazed', 'glazing', 'windows', 'doors',
+        'kitchen', 'living', 'dining', 'laundry', 'study', 'office',
+        'ensuite', 'master', 'robe', 'robes', 'wardrobe', 'storage',
+    ]
+    
+    # Strip question marks and check if query is just asking about an attribute
+    query_normalized = query_lower.strip().rstrip('?!.,').strip()
+    
+    # Match exact single words or simple phrases (e.g., "zoning", "bedrooms", "land size")
+    if query_normalized in property_attribute_keywords:
+        return True
+    
+    # Also match if the query contains these keywords as the main subject
+    # e.g., "what's the zoning", "tell me about bedrooms", "how about parking"
+    for keyword in property_attribute_keywords:
+        # Match if keyword appears as a standalone word (not part of a larger phrase about licensing/generic topics)
+        if re.search(rf'\b{re.escape(keyword)}\b', query_normalized):
+            # Exclude if it's clearly a generic question about the concept itself
+            generic_indicators = ['what is a', 'what are', 'explain', 'definition', 'meaning of', 'what does', 'how does']
+            if not any(indicator in query_lower for indicator in generic_indicators):
+                return True
+    
     return False
 
 

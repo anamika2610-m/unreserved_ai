@@ -149,6 +149,39 @@ engine: Engine = create_engine(
     echo=False,
 )
 
+# Configure PostgreSQL session-level timeouts to prevent idle transactions
+# These are applied to EVERY connection in the pool
+@event.listens_for(engine, "connect")
+def set_postgresql_timeout(dbapi_conn, connection_record):
+    """
+    Set PostgreSQL-level timeouts to prevent idle transactions.
+    
+    - statement_timeout: Kill queries that run longer than 60 seconds
+    - idle_in_transaction_session_timeout: Kill idle transactions after 60 seconds
+    
+    This is the MOST EFFECTIVE way to prevent "idle in transaction" issues.
+    """
+    cursor = dbapi_conn.cursor()
+    try:
+        # Kill queries that run longer than 60 seconds (60000 ms)
+        cursor.execute("SET statement_timeout = '60000'")
+        
+        # Kill idle transactions after 60 seconds (60000 ms)
+        # This is the KEY setting to prevent "idle in transaction"
+        cursor.execute("SET idle_in_transaction_session_timeout = '60000'")
+        
+        # Optional: Set lock timeout to prevent long waits on locks
+        cursor.execute("SET lock_timeout = '30000'")  # 30 seconds
+        
+        cursor.close()
+        dbapi_conn.commit()
+    except Exception as e:
+        print(f"⚠️  Failed to set PostgreSQL timeouts: {e}")
+        try:
+            cursor.close()
+        except:
+            pass
+
 # Note: pool_pre_ping=True already tests connections before use
 # Additional error handling is done in get_db() and repository methods
 
@@ -221,11 +254,30 @@ def get_db() -> Generator[Session, None, None]:
                 print("⚠️  Connection pool invalidated due to closed connection")
             except:
                 pass
-        db.rollback()
+        try:
+            db.rollback()
+        except:
+            pass
         raise
     except Exception:
-        db.rollback()
+        try:
+            db.rollback()
+        except:
+            pass
         raise
     finally:
-        db.close()
+        # ✅ CRITICAL: Ensure transaction is closed before returning connection to pool
+        # This prevents "idle in transaction" state
+        try:
+            # Check if transaction is still active
+            if db.in_transaction():
+                print("⚠️  Warning: Transaction still active in finally block, rolling back")
+                db.rollback()
+        except:
+            pass
+        
+        try:
+            db.close()
+        except:
+            pass
 

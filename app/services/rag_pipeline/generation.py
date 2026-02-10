@@ -287,7 +287,7 @@ class ResponseGenerator:
                     )
                 else:
                     answer = (
-                        "I don't have detailed information on that topic in my knowledge base. "
+                        "I don't have detailed information on that topic. "
                         "For specific questions about real estate law, licensing, or processes in Victoria, "
                         "I recommend consulting with a qualified professional such as a lawyer, "
                         "licensed real estate agent, or Consumer Affairs Victoria (CAV)."
@@ -699,7 +699,25 @@ class ResponseGenerator:
         # 4️⃣ Check if this is an invalid/irrelevant amenity query (check BEFORE valid amenity check)
         if is_invalid_amenity_query(query):
             print(f"⚠️  Invalid/irrelevant amenity query detected: '{query}'")
-            # Extract the invalid term to make the response more helpful
+
+            # For enquiry messages, treat low-confidence amenity queries as "no data" and use
+            # the automated email fallback instead of asking clarifying questions.
+            if is_enquiry_message:
+                answer = (
+                    "This is an automated email. We don't have enough information to answer this enquiry "
+                    "right now, but we will get back to you shortly."
+                )
+                return self._create_response_dict(
+                    answer=answer,
+                    needs_vendor_contact=False,
+                    escalation_reason="Invalid/irrelevant query for enquiry message",
+                    data_sources=[],
+                    query=query,
+                    listing_id=listing_id,
+                    user_id=user_id,
+                )
+
+            # For interactive chat, keep the clarifying behaviour
             query_lower = query.lower()
             found_invalid = [term for term in INVALID_AMENITY_TERMS if term in query_lower]
             
@@ -730,11 +748,14 @@ class ResponseGenerator:
             )
         
         # 5️⃣ Get listing activity metrics for tone adaptation
+        # IMPORTANT: Only fetch activity metrics (and compute tone) for PROPERTY queries.
+        # For GENERIC knowledge queries (laws, processes, training PDFs), we skip
+        # all activity/tone work to avoid unnecessary DB calls and side effects.
         listing_activity_data = None
         tone_level = ToneLevel.NEUTRAL
         tone_context = ""
         
-        if listing_id:
+        if query_source == "property" and listing_id:
             try:
                 from app.db.session import SessionLocal
                 from app.db.postgres.repositories.listing_activity_repository import ListingActivityRepository
@@ -746,9 +767,11 @@ class ResponseGenerator:
                     
                     if listing_activity_data:
                         print(f"🎭 Fetching tone adaptation for listing {listing_id}")
-                        print(f"   Activity metrics: enquiries={listing_activity_data.get('enquiries_7d', 0)}, "
-                              f"offers={listing_activity_data.get('genuine_offers_7d', 0)}, "
-                              f"contracts={listing_activity_data.get('contract_requests_7d', 0)}")
+                        print(
+                            f"   Activity metrics: enquiries={listing_activity_data.get('enquiries_7d', 0)}, "
+                            f"offers={listing_activity_data.get('genuine_offers_7d', 0)}, "
+                            f"contracts={listing_activity_data.get('contract_requests_7d', 0)}"
+                        )
                         
                         tone_level, tone_context = self.tone_service.determine_tone(listing_activity_data)
                         
@@ -756,7 +779,7 @@ class ResponseGenerator:
                             print(f"🎭 Tone adaptation: {tone_level.value.upper()}")
                             print(f"   Context: {tone_context[:150]}...")
                         else:
-                            print(f"🎭 Tone adaptation: NEUTRAL (no special conditions met)")
+                            print("🎭 Tone adaptation: NEUTRAL (no special conditions met)")
                     else:
                         print(f"🎭 No activity data found for listing {listing_id} → using NEUTRAL tone")
                 finally:
@@ -765,6 +788,11 @@ class ResponseGenerator:
                 print(f"⚠️  Failed to get listing activity metrics: {type(e).__name__}: {e}")
                 import traceback
                 print(traceback.format_exc())
+        else:
+            print(
+                f"🎭 Skipping activity metrics/tone adaptation "
+                f"(query_source={query_source}, listing_id={listing_id})"
+            )
         
         # 5.5️⃣ Check if this is an amenity query (to pass has_amenity_links flag)
         # We need to check this BEFORE creating the prompt so the LLM knows to mention the link

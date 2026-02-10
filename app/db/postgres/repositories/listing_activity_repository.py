@@ -45,7 +45,10 @@ class ListingActivityRepository:
         )
         listing_result = result.fetchone()
         result.close()
-        # Don't commit read-only queries - FastAPI's get_db() manages session lifecycle
+        # ✅ MUST commit read-only queries to prevent "idle in transaction"
+        # Even though FastAPI's get_db() manages session lifecycle, we need to
+        # explicitly commit/rollback to close the transaction immediately
+        self.db_session.commit()
         
         if not listing_result:
             return None
@@ -435,6 +438,17 @@ class ListingActivityRepository:
             print(f"⚠️  Error querying B&P inspections: {e}")
             import traceback
             print(traceback.format_exc())
+            try:
+                self.db_session.rollback()
+            except:
+                pass
+        
+        # ✅ CRITICAL: Commit to close the transaction and prevent "idle in transaction"
+        # All queries above are read-only, but the transaction MUST be closed
+        try:
+            self.db_session.commit()
+        except Exception as e:
+            print(f"⚠️  Failed to commit read transaction: {e}")
             try:
                 self.db_session.rollback()
             except:
