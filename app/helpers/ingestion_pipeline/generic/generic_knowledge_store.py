@@ -59,9 +59,12 @@ class GenericKnowledgeStore:
         self._owns_session = db_session is None
     
     @contextmanager
-    def _handle_errors(self):
+    def _handle_errors(self, auto_commit: bool = True):
         """
-        Context manager for automatic error handling and rollback.
+        Context manager for automatic error handling and transaction cleanup.
+        
+        Args:
+            auto_commit: If True, commits after successful operations to prevent idle transactions
         
         Usage:
             with self._handle_errors():
@@ -69,7 +72,16 @@ class GenericKnowledgeStore:
         """
         try:
             yield
+            # ✅ CRITICAL: Commit to close the transaction and prevent "idle in transaction"
+            if auto_commit:
+                try:
+                    self.db_session.commit()
+                except:
+                    pass  # Already committed explicitly in some methods
         except SQLAlchemyError as e:
+            self.db_session.rollback()
+            raise e
+        except Exception as e:
             self.db_session.rollback()
             raise e
     

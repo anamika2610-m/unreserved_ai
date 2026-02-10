@@ -1,15 +1,17 @@
 """
-Voice transcription API endpoint using OpenAI Whisper.
-Transcribes voice input and immediately deletes the file for security.
+Voice transcription and text-to-speech API endpoints.
+- Transcribes voice input using OpenAI Whisper
+- Converts text to speech using OpenAI TTS
 """
 import os
 import tempfile
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, Query
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Literal
 from uuid import UUID
 import traceback
+import io
 
 from app.services.rag_pipeline.llms import get_llm_client
 
@@ -221,9 +223,120 @@ async def transcribe_and_chat(
             detail=f"Chat processing failed: {str(e)}"
         )
     finally:
-        # Close database session
-        try:
-            db.close()
-        except:
-            pass
+            # Close database session
+            try:
+                db.close()
+            except:
+                pass
+
+
+class TextToSpeechRequest(BaseModel):
+    """Request model for text-to-speech."""
+    
+    text: str = Field(..., description="Text to convert to speech", min_length=1, max_length=4096)
+    voice: Literal["alloy", "echo", "fable", "onyx", "nova", "shimmer","coral","sage"] = Field(
+        default="onyx",
+        description="Voice to use for speech synthesis"
+    )
+    model: Literal["tts-1", "tts-1-hd"] = Field(
+        default="tts-1",
+        description="TTS model to use (tts-1 is faster, tts-1-hd is higher quality)"
+    )
+    speed: float = Field(
+        default=1.0,
+        ge=0.25,
+        le=4.0,
+        description="Speed of the generated speech (0.25 to 4.0)"
+    )
+
+
+@router.post("/text-to-speech")
+async def text_to_speech(
+    request: TextToSpeechRequest,
+    format: Literal["mp3", "opus", "aac", "flac"] = Query(
+        default="mp3",
+        description="Audio format for the output"
+    ),
+) -> StreamingResponse:
+    """
+    Convert text to speech using OpenAI TTS (Text-to-Speech) API.
+    
+    **Supported voices**: alloy, echo, fable, onyx, nova, shimmer
+    
+    **Supported formats**: mp3, opus, aac, flac
+    
+    **Speed range**: 0.25x to 4.0x (default: 1.0x)
+    
+    **Models**:
+    - `tts-1`: Faster, lower latency
+    - `tts-1-hd`: Higher quality, slightly slower
+    
+    **Usage**:
+    ```bash
+    curl -X POST "http://localhost:8000/api/v1/voice/text-to-speech?format=mp3" \\
+      -H "Content-Type: application/json" \\
+      -d '{"text": "Hello, this is a test.", "voice": "nova"}' \\
+      --output audio.mp3
+    ```
+    
+    **Response**: Returns audio file as binary stream with appropriate content-type.
+    """
+    try:
+        llm_client = get_llm_client()
+    except ValueError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"OpenAI client not available: {str(e)}"
+        )
+    
+    # Validate text length (OpenAI TTS limit is 4096 characters)
+    if len(request.text) > 4096:
+        raise HTTPException(
+            status_code=400,
+            detail="Text length exceeds maximum of 4096 characters"
+        )
+    
+    print(f"🔊 Converting text to speech: {len(request.text)} chars, voice={request.voice}, model={request.model}, format={format}")
+    
+    try:
+        # Generate speech using OpenAI TTS
+        response = llm_client.audio.speech.create(
+            model=request.model,
+            voice=request.voice,
+            input=request.text,
+            response_format=format,
+            speed=request.speed,
+        )
+        
+        # Read the audio data into memory
+        audio_data = response.content
+        
+        print(f"✅ TTS successful: {len(audio_data)} bytes generated")
+        
+        # Determine content type based on format
+        content_types = {
+            "mp3": "audio/mpeg",
+            "opus": "audio/opus",
+            "aac": "audio/aac",
+            "flac": "audio/flac",
+        }
+        content_type = content_types.get(format, "audio/mpeg")
+        
+        # Return audio as streaming response
+        return StreamingResponse(
+            io.BytesIO(audio_data),
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="speech.{format}"',
+                "Content-Length": str(len(audio_data)),
+            }
+        )
+    
+    except Exception as e:
+        print(f"❌ TTS failed: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Text-to-speech conversion failed: {str(e)}"
+        )
 

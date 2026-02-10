@@ -32,9 +32,12 @@ class BaseRepository(Generic[ModelType]):
         self.session = session
     
     @contextmanager
-    def _handle_errors(self):
+    def _handle_errors(self, auto_commit_read: bool = True):
         """
-        Context manager for automatic error handling and rollback.
+        Context manager for automatic error handling and transaction cleanup.
+        
+        Args:
+            auto_commit_read: If True, commits read-only operations to prevent idle transactions
         
         Usage:
             with self._handle_errors():
@@ -42,7 +45,19 @@ class BaseRepository(Generic[ModelType]):
         """
         try:
             yield
+            # ✅ CRITICAL: Always commit to close the transaction
+            # This prevents "idle in transaction" state even for read-only queries
+            if auto_commit_read and not self.session.in_transaction():
+                # Transaction already committed/rolled back by explicit code
+                pass
+            elif auto_commit_read:
+                # Commit to close the transaction (safe for reads and writes)
+                self.session.commit()
         except SQLAlchemyError as e:
+            self.session.rollback()
+            raise e
+        except Exception as e:
+            # Rollback on any error to ensure transaction is closed
             self.session.rollback()
             raise e
     

@@ -311,14 +311,23 @@ class QueryAugmenter:
                 return False, "Price information not available in listing data."
       
         # Check specification queries
-        if not price_query and any(kw in query_lower for kw in SPECIFICATION_KEYWORDS):
-            if not any(kw in context_lower for kw in SPECIFICATION_KEYWORDS):
-                return False, "Specification details not found in listing data."
+        # NOTE: Previously we required SPECIFICATION_KEYWORDS (e.g. 'bedroom', 'zoning')
+        # to appear explicitly in the context, otherwise we treated data as insufficient.
+        # This was too strict and caused fallbacks even when the underlying chunks
+        # contained the structured values but not the exact keywords.
+        # We now rely on the presence of data_sources for sufficiency and let the LLM
+        # decide based on the retrieved context.
+        # (Keep this block for future refinement if needed, but do not block responses.)
+        # if not price_query and any(kw in query_lower for kw in SPECIFICATION_KEYWORDS):
+        #     if not any(kw in context_lower for kw in SPECIFICATION_KEYWORDS):
+        #         return False, "Specification details not found in listing data."
         
         # Check location queries
-        if any(kw in query_lower for kw in LOCATION_KEYWORDS):
-            if 'address' not in context_lower and 'location' not in context_lower:
-                return False, "Location information not found in listing data."
+        # Similarly, avoid hard-blocking when 'address'/'location' strings are missing
+        # from the flattened context; we already know we have some data_sources.
+        # if any(kw in query_lower for kw in LOCATION_KEYWORDS):
+        #     if 'address' not in context_lower and 'location' not in context_lower:
+        #         return False, "Location information not found in listing data."
         
         # Check amenity queries (schools, hospitals, etc.)
         # Amenity information is typically in property PDFs, not JSON chunks
@@ -421,33 +430,52 @@ class QueryAugmenter:
         if any(kw in query_lower for kw in PROPERTY_CATEGORY_KEYWORDS):
             return True, None
         
-        # 🚨 STRICT SUFFICIENCY CHECK - DEFAULT TO INSUFFICIENT
-        # Only mark as sufficient if we can PROVE the JSON chunks contain the answer
-        # This ensures the full cascade: JSON → Property PDFs → Generic PDFs → Fallback
+        # 🚨 RELAXED SUFFICIENCY CHECK
+        # Previously we required query keywords to literally appear in the context,
+        # but this was too strict and blocked valid data (e.g., structured fields
+        # like bedrooms:3, zoning:RGZ1 that don't repeat the field name).
+        # 
+        # NEW APPROACH: If we have data_sources with reasonable similarity (>0.25),
+        # trust that the retriever found relevant chunks and let the LLM decide.
+        # Only fail sufficiency if similarity is very low (<0.25) or no chunks at all.
         
-        # Check if the query keywords appear in the context
-        # Extract meaningful keywords from the query (excluding stop words)
-        stop_words = {'what', 'is', 'the', 'are', 'does', 'do', 'can', 'you', 'tell', 'me', 
-                     'about', 'show', 'of', 'in', 'on', 'at', 'to', 'for', 'a', 'an', 'this',
-                     'that', 'these', 'those', 'property', 'listing'}
-        query_words = [w.lower() for w in query_lower.split() if w.lower() not in stop_words and len(w) > 2]
-        
-        # Check if at least SOME query keywords appear in the context
-        if query_words:
-            matching_words = [w for w in query_words if w in context_lower]
-            match_ratio = len(matching_words) / len(query_words)
+        if data_sources:
+            # Check top similarity score
+            top_similarity = data_sources[0].similarity_score if data_sources[0].similarity_score is not None else 0.0
             
-            print(f"🔍 Sufficiency check: {len(matching_words)}/{len(query_words)} query keywords found in context (ratio: {match_ratio:.2f})")
-            print(f"   Query keywords: {query_words[:10]}")  # Show first 10
-            print(f"   Matching keywords: {matching_words[:10]}")  # Show first 10
-            
-            # Require at least 30% of query keywords to be in the context
-            if match_ratio < 0.3:
-                print(f"   ❌ INSUFFICIENT: Low keyword match ratio ({match_ratio:.2f} < 0.3)")
-                return False, f"JSON chunks don't contain enough relevant keywords to answer the query - should check property PDFs."
+            # If similarity is decent (>0.25), trust the retrieval
+            if top_similarity > 0.25:
+                print(f"   ✅ SUFFICIENT: Retrieved {len(data_sources)} chunks with good similarity ({top_similarity:.4f} > 0.25)")
+                return True, None
+            else:
+                print(f"   ⚠️  LOW SIMILARITY: Top chunk similarity is {top_similarity:.4f} (< 0.25)")
+                # Don't immediately fail - check if query keywords appear in context as fallback
+                stop_words = {'what', 'is', 'the', 'are', 'does', 'do', 'can', 'you', 'tell', 'me', 
+                             'about', 'show', 'of', 'in', 'on', 'at', 'to', 'for', 'a', 'an', 'this',
+                             'that', 'these', 'those', 'property', 'listing', 'how', 'many'}
+                query_words = [w.lower().strip('?!.,') for w in query_lower.split() if w.lower() not in stop_words and len(w.strip('?!.,')) > 2]
+                
+                if query_words:
+                    matching_words = [w for w in query_words if w in context_lower]
+                    match_ratio = len(matching_words) / len(query_words) if query_words else 0
+                    
+                    print(f"   🔍 Keyword check: {len(matching_words)}/{len(query_words)} query keywords found (ratio: {match_ratio:.2f})")
+                    print(f"      Query keywords: {query_words[:5]}")
+                    print(f"      Matching: {matching_words[:5]}")
+                    
+                    if match_ratio >= 0.3:
+                        print(f"   ✅ SUFFICIENT: Keyword match ratio acceptable ({match_ratio:.2f} >= 0.3)")
+                        return True, None
+                    else:
+                        print(f"   ❌ INSUFFICIENT: Low keyword match and low similarity")
+                        return False, "Retrieved chunks have low similarity and don't contain query keywords"
+                else:
+                    # No meaningful query words - trust the similarity
+                    print(f"   ✅ SUFFICIENT: No meaningful keywords to check, trusting retrieval")
+                    return True, None
         
-        # If we reach here, the context seems relevant
-        print(f"   ✅ SUFFICIENT: JSON chunks appear to contain relevant information")
+        # If we reach here, we have chunks with decent similarity
+        print(f"   ✅ SUFFICIENT: Data sources present")
         return True, None
     
     def _augment_generic_query(
@@ -491,6 +519,7 @@ class QueryAugmenter:
             try:
                 result = self.generic_store.db_session.execute(debug_query)
                 aml_count = result.scalar()
+                result.close()
                 print(f"   🔍 DEBUG: Found {aml_count} chunks containing 'aml' or 'anti-money laundering' in content")
                 
                 # Also show a sample if found
@@ -506,10 +535,18 @@ class QueryAugmenter:
                     """)
                     sample_result = self.generic_store.db_session.execute(sample_query)
                     sample_row = sample_result.fetchone()
+                    sample_result.close()
                     if sample_row:
                         print(f"   🔍 DEBUG Sample: {sample_row[0]}...")
+                
+                # Commit debug queries to prevent idle transactions
+                self.generic_store.db_session.commit()
             except Exception as e:
                 print(f"   ⚠️  DEBUG check failed: {e}")
+                try:
+                    self.generic_store.db_session.rollback()
+                except:
+                    pass
         
         # Normalize query to fix common typos
         normalized_query = query

@@ -365,6 +365,8 @@ class PgVectorStore:
                 # Commit the read transaction immediately to release locks
                 # This prevents "idle in transaction" state
                 self.db_session.commit()
+            
+            
                 
                 break
             except OperationalError as e:
