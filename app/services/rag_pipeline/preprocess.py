@@ -414,6 +414,11 @@ def _is_obviously_property(query_lower: str) -> bool:
         r'\b(?:where\s+is|what\s+is\s+the\s+location|address)',
         r'\b(?:nearby|close\s+to)\s+(?:school|hospital|supermarket)',
         r'\b(?:inspection|viewing|open\s+house)\s+(?:schedule|time|date)',
+        # Nearby/comparable sales queries (property-specific)
+        r'\b(?:nearby|near|close)\s+(?:propert|sale|sold)',
+        r'\b(?:propert|sale|home).*\b(?:sold|sale).*\b(?:nearby|near|close)',
+        r'\bcomparable\s+(?:sale|propert)',
+        r'\brecent\s+(?:sale|sold).*\b(?:nearby|near|area)',
     ]
     
     for pattern in strong_property_patterns:

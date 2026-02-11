@@ -114,7 +114,7 @@ class GenericPDFUploadResponse(BaseModel):
 
 
 # Webhook secret for security
-# WEBHOOK_SECRET = os.getenv("VECTOR_SYNC_WEBHOOK_SECRET", "change-me-in-production")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") or os.getenv("REQUIRE_WEBHOOK_SECRET")
 REQUIRE_WEBHOOK_SECRET = os.getenv("REQUIRE_WEBHOOK_SECRET", "true").lower() == "true"
 
 
@@ -123,20 +123,27 @@ def verify_webhook_secret(x_webhook_secret: Optional[str] = Header(None)):
     Verify webhook secret for security.
     
     In development (REQUIRE_WEBHOOK_SECRET=false), secret is optional.
-    In production (REQUIRE_WEBHOOK_SECRET=true), secret is required.
+    In production (REQUIRE_WEBHOOK_SECRET=true), secret is required and must match WEBHOOK_SECRET.
+    
+    Environment variables:
+    - REQUIRE_WEBHOOK_SECRET: "true" or "false" (default: "true")
+    - WEBHOOK_SECRET: The actual secret value (can also be set via REQUIRE_WEBHOOK_SECRET for backwards compatibility)
     """
+    # If explicitly disabled, allow all requests
     if not REQUIRE_WEBHOOK_SECRET:
         # Development mode - secret is optional
         return
     
-    if REQUIRE_WEBHOOK_SECRET == "change-me-in-production":
-        # Default secret in production is a security risk
+    # Check if webhook secret is configured
+    if not WEBHOOK_SECRET or WEBHOOK_SECRET == "true":
+        # Secret not properly configured - either missing or set to "true" (boolean flag instead of actual secret)
         raise HTTPException(
             status_code=500,
-            detail="Webhook secret not configured. Set REQUIRE_WEBHOOK_SECRET environment variable."
+            detail="Webhook secret not configured. Set WEBHOOK_SECRET environment variable."
         )
     
-    if x_webhook_secret != REQUIRE_WEBHOOK_SECRET:
+    # Verify the provided secret matches
+    if x_webhook_secret != WEBHOOK_SECRET:
         raise HTTPException(
             status_code=401,
             detail="Invalid webhook secret"
