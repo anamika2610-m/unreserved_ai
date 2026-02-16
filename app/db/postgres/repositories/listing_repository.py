@@ -57,6 +57,12 @@ class ListingRepository:
         with self._handle_errors():
             result = self.session.execute(text(query_str), params or {})
             rows = result.fetchall()
+            # ✅ Explicitly end the read-only transaction to avoid "idle in transaction"
+            try:
+                self.session.commit()
+            except Exception:
+                # If commit fails (e.g. connection already closed), let caller handle it
+                pass
             return [dict(row._mapping) for row in rows]
     
     def _execute_query_one(
@@ -77,6 +83,11 @@ class ListingRepository:
         with self._handle_errors():
             result = self.session.execute(text(query_str), params or {})
             row = result.fetchone()
+            # ✅ Explicitly end the read-only transaction to avoid "idle in transaction"
+            try:
+                self.session.commit()
+            except Exception:
+                pass
             return dict(row._mapping) if row else None
     
     def fetch_listings(

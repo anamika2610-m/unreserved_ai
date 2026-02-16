@@ -7,6 +7,7 @@ Now using pgvector (PostgreSQL native vector storage) instead of ChromaDB.
 from contextlib import contextmanager
 from typing import List, Dict, Any, Optional, Tuple
 import re
+import time
 import traceback
 
 from app.helpers.ingestion_pipeline.property.pgvector_store import PgVectorStore
@@ -68,6 +69,7 @@ class PropertyRetriever:
             vector_store: Optional PgVectorStore instance. If None, creates a new one.
         """
         self.vector_store = vector_store or PgVectorStore()
+        self._last_timings: Dict[str, float] = {}  # fine-grained timers from last retrieve call
     
     @contextmanager
     def _get_listing_repository(self):
@@ -321,7 +323,16 @@ class PropertyRetriever:
     ) -> List[Dict[str, Any]]:
         """
         Safe retrieval logic with multi-topic query detection.
+        Embeds the query once and reuses the embedding for all vector searches (reduces latency).
         """
+        self._last_timings = {}
+        t0 = time.perf_counter()
+        # Embed query once and reuse for all searches (avoids N embedding API calls)
+        emb = self.vector_store.embedding_model.encode([query], convert_to_numpy=False)
+        _qe = emb[0] if emb else None
+        query_embedding = (_qe.tolist() if _qe is not None and hasattr(_qe, 'tolist') else (list(_qe) if _qe is not None else None))
+        self._last_timings["embed_ms"] = (time.perf_counter() - t0) * 1000.0
+        t_after_embed = time.perf_counter()
 
         query_lower = query.lower()
         is_price_query = any(k in query_lower for k in self.PRICE_KEYWORDS)
@@ -354,7 +365,8 @@ class PropertyRetriever:
                 type_results = self.vector_store.search(
                     query=query,
                     n_results=per_type_results,
-                    filter_metadata={'listing_id': listing_id, 'chunk_type': chunk_type}
+                    filter_metadata={'listing_id': listing_id, 'chunk_type': chunk_type},
+                    query_embedding=query_embedding,
                 )
                 for r in type_results:
                     if r['id'] not in seen_ids:
@@ -368,13 +380,15 @@ class PropertyRetriever:
                     query=query,
                     n_results=n_results - len(results),
                     listing_id=listing_id,
-                    chunk_types=['overview', 'pricing', 'specifications', 'location', 'attributes', 'amenities']  # Exclude property_document
+                    chunk_types=['overview', 'pricing', 'specifications', 'location', 'attributes', 'amenities'],  # Exclude property_document
+                    query_embedding=query_embedding,
                 )
                 for r in additional:
                     if r['id'] not in seen_ids:
                         results.append(r)
                         seen_ids.add(r['id'])
             
+            self._last_timings["search_rerank_ms"] = (time.perf_counter() - t_after_embed) * 1000.0
             return self._rerank(results, query)[:n_results]
 
         if is_price_query and not is_multi_topic:
@@ -406,7 +420,8 @@ class PropertyRetriever:
             doc_results = self.vector_store.search(
                 query=query,
                 n_results=max(3, n_results // 2),
-                filter_metadata={'listing_id': listing_id, 'chunk_type': 'property_document'}
+                filter_metadata={'listing_id': listing_id, 'chunk_type': 'property_document'},
+                query_embedding=query_embedding,
             )
             for r in doc_results:
                 results.append(r)
@@ -416,7 +431,8 @@ class PropertyRetriever:
             other_results = self.vector_store.search(
                 query=query,
                 n_results=n_results - len(results),
-                filter_metadata={'listing_id': listing_id}
+                filter_metadata={'listing_id': listing_id},
+                query_embedding=query_embedding,
             )
             for r in other_results:
                 if r['id'] not in seen_ids:
@@ -431,6 +447,7 @@ class PropertyRetriever:
                         results.append(chunk)
                         seen_ids.add(chunk['id'])
             
+            self._last_timings["search_rerank_ms"] = (time.perf_counter() - t_after_embed) * 1000.0
             return self._rerank(results, query)[:n_results]
 
         filters = {}
@@ -452,7 +469,8 @@ class PropertyRetriever:
             n_results=n_results,
             listing_id=listing_id,
             chunk_types=chunk_types if chunk_types else None,
-            filter_metadata=filters if filters else None
+            filter_metadata=filters if filters else None,
+            query_embedding=query_embedding,
         )
         
         print(f"✅ vector_store.search returned {len(results)} results:")
@@ -476,6 +494,7 @@ class PropertyRetriever:
                     results.append(chunk)
                     seen_ids.add(chunk['id'])
 
+        self._last_timings["search_rerank_ms"] = (time.perf_counter() - t_after_embed) * 1000.0
         return self._rerank(results, query)[:n_results]
 
    
@@ -559,123 +578,102 @@ class PropertyRetriever:
         
         if not is_location_query:
             return standard_results, None
-        
-        current_location = None
-        for result in standard_results:
-            location = get_location_from_chunk(result.get('metadata', {}))
-            if location:
-                current_location = location
-                break
-        
-        if not current_location:
-            listing_chunks = self.vector_store.get_by_listing_id(listing_id)
-            for chunk in listing_chunks:
-                location = get_location_from_chunk(chunk.get('metadata', {}))
-                if location:
-                    current_location = location
-                    break
-        
-        # If still no location, try to get it from database directly via repository
-        if not current_location:
-            current_location = self._get_location_from_database(listing_id)
-        
-        # If we have location, extract coordinates
-        if current_location:
-            current_lat, current_lon, current_address = current_location
-        else:
-            # Even without coordinates, we can still find same-suburb properties if we have suburb
-            current_lat = None
-            current_lon = None
-            current_address = None
-            print(f"⚠️  No location coordinates for listing {listing_id}, but will try same-suburb search if suburb available")
-        
-        # Extract suburb from current property
+
+        # Fetch location and suburb in one DB call (avoids 2x get_by_listing_id and 2x repo calls)
+        t_loc = time.perf_counter()
+        current_lat = None
+        current_lon = None
+        current_address = None
         current_suburb = None
-        for result in standard_results:
-            suburb = get_suburb_from_chunk(result.get('metadata', {}))
-            if suburb:
-                current_suburb = suburb
-                break
-        
+        location_data = None
+        try:
+            with self._get_listing_repository() as listing_repo:
+                location_data = listing_repo.get_listing_location(listing_id)
+                if location_data:
+                    lat, lon = location_data.get('latitude'), location_data.get('longitude')
+                    if lat is not None and lon is not None:
+                        current_lat, current_lon = float(lat), float(lon)
+                    current_address = (location_data.get('displayAddress') or '').strip() or None
+                    current_suburb = (location_data.get('suburb') or '').strip() or None
+        except Exception as e:
+            print(f"⚠️  Could not fetch location/suburb for listing {listing_id}: {e}")
+        self._last_timings["get_location_ms"] = (time.perf_counter() - t_loc) * 1000.0
+
+        # Fallback: get from retrieval results; only re-query DB if we never got location_data (avoids redundant calls)
+        if current_lat is None and current_lon is None:
+            for result in standard_results:
+                location = get_location_from_chunk(result.get('metadata', {}))
+                if location:
+                    current_lat, current_lon, current_address = location
+                    break
+            if current_lat is None and location_data is None:
+                loc = self._get_location_from_database(listing_id)
+                if loc:
+                    current_lat, current_lon, current_address = loc
         if not current_suburb:
-            listing_chunks = self.vector_store.get_by_listing_id(listing_id)
-            for chunk in listing_chunks:
-                suburb = get_suburb_from_chunk(chunk.get('metadata', {}))
+            for result in standard_results:
+                suburb = get_suburb_from_chunk(result.get('metadata', {}))
                 if suburb:
                     current_suburb = suburb
                     break
-        
-        # If still no suburb, try to get it from database directly via repository
-        if not current_suburb:
-            current_suburb = self._get_suburb_from_database(listing_id)
+            if not current_suburb and location_data is None:
+                current_suburb = self._get_suburb_from_database(listing_id)
         
         nearby_properties = []
         same_suburb_properties = []
-        
+
         if query_type == 'nearby_properties':
-            all_chunks_dict = self.vector_store.get_all_chunks()
-            # get_all_chunks returns {'ids': [...], 'documents': [...], 'metadatas': [...]}
-            # Convert to chunks format: [{'content': ..., 'metadata': ...}, ...]
-            all_properties = [
-                {
-                    'content': doc,
-                    'metadata': meta
-                }
-                for doc, meta in zip(
-                    all_chunks_dict.get('documents', []),
-                    all_chunks_dict.get('metadatas', [])
-                )
-            ]
-            
-            # Only try nearby properties search if we have coordinates
+            # Use database first for nearby/same-suburb (avoids loading all chunks via get_all_chunks())
             nearby_properties_raw = []
             if current_lat is not None and current_lon is not None:
                 print(f"🔍 Searching for nearby properties (lat={current_lat}, lon={current_lon}, max_distance={max_distance_km}km)")
-                nearby_properties_raw = find_nearby_properties(
+                t_nearby = time.perf_counter()
+                nearby_properties_raw = self._fetch_nearby_properties_from_database(
                     current_lat=current_lat,
                     current_lon=current_lon,
-                    all_properties=all_properties,
+                    listing_id=listing_id,
                     max_distance_km=max_distance_km,
-                    max_results=max_nearby_properties,
-                    current_listing_id=listing_id  # Exclude the current listing from nearby results
+                    max_nearby_properties=max_nearby_properties
                 )
-                print(f"   Found {len(nearby_properties_raw)} nearby properties from chunks")
-                
-                # If no nearby properties found in chunks, try database directly via repository
-                if not nearby_properties_raw:
-                    print(f"⚠️  No nearby properties found in chunks, checking database directly")
-                    nearby_properties_raw = self._fetch_nearby_properties_from_database(
+                self._last_timings["nearby_db_ms"] = (time.perf_counter() - t_nearby) * 1000.0
+                if nearby_properties_raw:
+                    print(f"   Found {len(nearby_properties_raw)} nearby properties from database")
+            if not nearby_properties_raw and current_suburb:
+                print(f"   Trying same-suburb properties in '{current_suburb}'")
+                t_suburb = time.perf_counter()
+                same_suburb_properties = self._fetch_same_suburb_properties_from_database(
+                    current_suburb=current_suburb,
+                    listing_id=listing_id,
+                    max_nearby_properties=max_nearby_properties
+                )
+                self._last_timings["same_suburb_db_ms"] = (time.perf_counter() - t_suburb) * 1000.0
+            # Fallback: only load all chunks when DB returned nothing (slow path)
+            if not nearby_properties_raw and not same_suburb_properties:
+                all_chunks_dict = self.vector_store.get_all_chunks()
+                all_properties = [
+                    {'content': doc, 'metadata': meta}
+                    for doc, meta in zip(
+                        all_chunks_dict.get('documents', []),
+                        all_chunks_dict.get('metadatas', [])
+                    )
+                ]
+                if current_lat is not None and current_lon is not None:
+                    nearby_properties_raw = find_nearby_properties(
                         current_lat=current_lat,
                         current_lon=current_lon,
-                        listing_id=listing_id,
+                        all_properties=all_properties,
                         max_distance_km=max_distance_km,
-                        max_nearby_properties=max_nearby_properties
+                        max_results=max_nearby_properties,
+                        current_listing_id=listing_id
                     )
-            else:
-                print(f"⚠️  No coordinates available, skipping nearby properties search")
-            
-            # If no nearby properties found (or no coordinates), check for same-suburb properties
-            if not nearby_properties_raw and current_suburb:
-                print(f"⚠️  No nearby properties found within {max_distance_km}km, checking for same-suburb properties in '{current_suburb}'")
-                same_suburb_properties_raw = find_same_suburb_properties(
-                    current_suburb=current_suburb,
-                    all_properties=all_properties,
-                    max_results=max_nearby_properties,
-                    current_listing_id=listing_id
-                )
-                same_suburb_properties = same_suburb_properties_raw
-                print(f"   Found {len(same_suburb_properties)} same-suburb properties from chunks")
-
-                
-                # If still no same-suburb properties from chunks, try database directly via repository
-                if not same_suburb_properties:
-                    print(f"⚠️  No same-suburb properties found in chunks, checking database directly for suburb '{current_suburb}'")
-                    same_suburb_properties = self._fetch_same_suburb_properties_from_database(
+                if not nearby_properties_raw and current_suburb:
+                    same_suburb_properties = find_same_suburb_properties(
                         current_suburb=current_suburb,
-                        listing_id=listing_id,
-                        max_nearby_properties=max_nearby_properties
+                        all_properties=all_properties,
+                        max_results=max_nearby_properties,
+                        current_listing_id=listing_id
                     )
-            
+
             # Enrich nearby properties with full listing data
             for nearby_prop in nearby_properties_raw:
                 self._enrich_property_with_chunks(nearby_prop)

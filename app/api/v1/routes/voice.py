@@ -1,10 +1,18 @@
 """
 Voice transcription and text-to-speech API endpoints.
 - Transcribes voice input using OpenAI Whisper
-- Converts text to speech using OpenAI TTS
+- Converts text to speech using ElevenLabs TTS
 """
 import os
 import tempfile
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env from project root so ELEVENLABS_API_KEY is available (in case app was started from another cwd)
+_project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
+load_dotenv(_project_root / ".env")
+
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -13,7 +21,13 @@ from uuid import UUID
 import traceback
 import io
 
+import requests
+
 from app.services.rag_pipeline.llms import get_llm_client
+
+# ElevenLabs TTS: default voice and API base
+ELEVENLABS_VOICE_ID = "56bWURjYFHyYyVf490Dp"
+ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1"
 
 router = APIRouter(prefix="/api/v1/voice", tags=["voice"])
 
@@ -231,112 +245,129 @@ async def transcribe_and_chat(
 
 
 class TextToSpeechRequest(BaseModel):
-    """Request model for text-to-speech."""
-    
-    text: str = Field(..., description="Text to convert to speech", min_length=1, max_length=4096)
-    voice: Literal["alloy", "echo", "fable", "onyx", "nova", "shimmer","coral","sage"] = Field(
-        default="onyx",
-        description="Voice to use for speech synthesis"
-    )
-    model: Literal["tts-1", "tts-1-hd"] = Field(
-        default="tts-1",
-        description="TTS model to use (tts-1 is faster, tts-1-hd is higher quality)"
+    """Request model for text-to-speech (ElevenLabs)."""
+
+    text: str = Field(
+        ...,
+        description="Text to convert to speech",
+        min_length=1,
+        max_length=5000,
     )
     speed: float = Field(
         default=1.0,
-        ge=0.25,
-        le=4.0,
-        description="Speed of the generated speech (0.25 to 4.0)"
+        ge=0.5,
+        le=2.0,
+        description="Speed of the generated speech (0.5 to 2.0)",
     )
 
+
+# ElevenLabs output_format values (see https://elevenlabs.io/docs/api-reference/text-to-speech)
+ELEVENLABS_OUTPUT_FORMATS = {
+    "mp3": "mp3_44100_128",
+    "opus": "opus_48000_64",
+}
 
 @router.post("/text-to-speech")
 async def text_to_speech(
     request: TextToSpeechRequest,
-    format: Literal["mp3", "opus", "aac", "flac"] = Query(
+    format: Literal["mp3", "opus"] = Query(
         default="mp3",
-        description="Audio format for the output"
+        description="Audio format for the output (mp3 or opus)",
     ),
 ) -> StreamingResponse:
     """
-    Convert text to speech using OpenAI TTS (Text-to-Speech) API.
-    
-    **Supported voices**: alloy, echo, fable, onyx, nova, shimmer
-    
-    **Supported formats**: mp3, opus, aac, flac
-    
-    **Speed range**: 0.25x to 4.0x (default: 1.0x)
-    
-    **Models**:
-    - `tts-1`: Faster, lower latency
-    - `tts-1-hd`: Higher quality, slightly slower
-    
+    Convert text to speech using ElevenLabs TTS.
+
+    Uses voice ID `56bWURjYFHyYyVf490Dp`. Set `ELEVENLABS_API_KEY` in the environment.
+
+    **Supported formats**: mp3, opus
+
+    **Speed range**: 0.5x to 2.0x (default: 1.0x)
+
     **Usage**:
     ```bash
     curl -X POST "http://localhost:8000/api/v1/voice/text-to-speech?format=mp3" \\
       -H "Content-Type: application/json" \\
-      -d '{"text": "Hello, this is a test.", "voice": "nova"}' \\
+      -d '{"text": "Hello, this is a test."}' \\
       --output audio.mp3
     ```
-    
+
     **Response**: Returns audio file as binary stream with appropriate content-type.
     """
-    try:
-        llm_client = get_llm_client()
-    except ValueError as e:
+    api_key = (
+        os.getenv("ELEVENLABS_API_KEY")
+        or os.getenv("XI_API_KEY")
+        or os.getenv("ELEVEN_LABS_API_KEY")
+    )
+    if api_key:
+        api_key = api_key.strip()
+    if not api_key:
         raise HTTPException(
             status_code=500,
-            detail=f"OpenAI client not available: {str(e)}"
+            detail="ElevenLabs API key not configured. Set ELEVENLABS_API_KEY or XI_API_KEY in .env (in project root).",
         )
-    
-    # Validate text length (OpenAI TTS limit is 4096 characters)
-    if len(request.text) > 4096:
+
+    if format not in ELEVENLABS_OUTPUT_FORMATS:
         raise HTTPException(
             status_code=400,
-            detail="Text length exceeds maximum of 4096 characters"
+            detail=f"Unsupported format. Use one of: {list(ELEVENLABS_OUTPUT_FORMATS.keys())}",
         )
-    
-    print(f"🔊 Converting text to speech: {len(request.text)} chars, voice={request.voice}, model={request.model}, format={format}")
-    
+
+    if len(request.text) > 5000:
+        raise HTTPException(
+            status_code=400,
+            detail="Text length exceeds maximum of 5000 characters",
+        )
+
+    print(f"🔊 Converting text to speech (ElevenLabs): {len(request.text)} chars, format={format}")
+
+    url = f"{ELEVENLABS_API_BASE}/text-to-speech/{ELEVENLABS_VOICE_ID}"
+    headers = {
+        "xi-api-key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg" if format == "mp3" else "audio/opus",
+    }
+    payload = {
+        "text": request.text,
+        "model_id": "eleven_multilingual_v2",
+        "output_format": ELEVENLABS_OUTPUT_FORMATS[format],
+    }
+
     try:
-        # Generate speech using OpenAI TTS
-        response = llm_client.audio.speech.create(
-            model=request.model,
-            voice=request.voice,
-            input=request.text,
-            response_format=format,
-            speed=request.speed,
+        resp = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=60,
         )
-        
-        # Read the audio data into memory
-        audio_data = response.content
-        
+        resp.raise_for_status()
+        audio_data = resp.content
         print(f"✅ TTS successful: {len(audio_data)} bytes generated")
-        
-        # Determine content type based on format
-        content_types = {
-            "mp3": "audio/mpeg",
-            "opus": "audio/opus",
-            "aac": "audio/aac",
-            "flac": "audio/flac",
-        }
+
+        content_types = {"mp3": "audio/mpeg", "opus": "audio/opus"}
         content_type = content_types.get(format, "audio/mpeg")
-        
-        # Return audio as streaming response
+
         return StreamingResponse(
             io.BytesIO(audio_data),
             media_type=content_type,
             headers={
                 "Content-Disposition": f'attachment; filename="speech.{format}"',
                 "Content-Length": str(len(audio_data)),
-            }
+            },
         )
-    
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 500
+        body = (e.response.text or str(e)) if e.response is not None else str(e)
+        print(f"❌ TTS failed (HTTP {status}): {body}")
+        raise HTTPException(
+            status_code=status,
+            detail=f"Text-to-speech failed: {body[:500]}",
+        )
     except Exception as e:
         print(f"❌ TTS failed: {e}")
         print(traceback.format_exc())
         raise HTTPException(
             status_code=500,
-            detail=f"Text-to-speech conversion failed: {str(e)}"
+            detail=f"Text-to-speech conversion failed: {str(e)}",
         )
 

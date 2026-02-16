@@ -291,17 +291,19 @@ class PgVectorStore:
         n_results: int = 5,
         listing_id: Optional[str] = None,
         chunk_types: Optional[List[str]] = None,
-        filter_metadata: Optional[Dict[str, Any]] = None
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        query_embedding: Optional[List[float]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for similar chunks using cosine similarity.
         
         Args:
-            query: Search query text
+            query: Search query text (used only when query_embedding is not provided)
             n_results: Number of results to return
             listing_id: Optional filter by listing ID (deprecated, use filter_metadata)
             chunk_types: Optional filter by chunk types (deprecated, use filter_metadata)
             filter_metadata: Optional metadata filters (ChromaDB compatibility)
+            query_embedding: Optional precomputed query embedding to avoid repeated encode() calls
             
         Returns:
             List of matching chunks with metadata and similarity scores
@@ -312,9 +314,13 @@ class PgVectorStore:
             if chunk_type_single and not chunk_types:
                 chunk_types = [chunk_type_single]
         
-        # Generate query embedding
-        query_embeddings = self.embedding_model.encode([query], convert_to_numpy=False)
-        query_embedding = query_embeddings[0] if query_embeddings else []
+        # Use precomputed embedding when provided (saves embedding API calls when doing multiple searches)
+        if query_embedding is not None:
+            query_embedding_list = list(query_embedding)
+        else:
+            query_embeddings = self.embedding_model.encode([query], convert_to_numpy=False)
+            raw = query_embeddings[0] if query_embeddings else []
+            query_embedding_list = raw.tolist() if hasattr(raw, 'tolist') else list(raw)
         
         sql = text("""
             SELECT 
@@ -335,9 +341,6 @@ class PgVectorStore:
             listing_filter="AND listing_id = :listing_id" if listing_id else "",
             chunk_type_filter="AND chunk_type = ANY(:chunk_types)" if chunk_types else ""
         ))
-        
-        # Ensure query_embedding is a list
-        query_embedding_list = query_embedding.tolist() if hasattr(query_embedding, 'tolist') else query_embedding
         
         params = {
             'query_embedding': query_embedding_list,

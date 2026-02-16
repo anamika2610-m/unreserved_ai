@@ -1,13 +1,18 @@
 """
 Repository for managing conversations and chat messages.
+
+Retention rules:
+- Conversations stay is_active for 10 days from last message (last_message_at).
+- Per-conversation chat history is capped at the latest 100 messages (older ones pruned on add).
 """
 
 import uuid
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc, and_
+from sqlalchemy import select, desc, and_, delete, func
 from sqlalchemy.exc import OperationalError, DisconnectionError
 
 from app.db.models.conversation import (
@@ -16,6 +21,10 @@ from app.db.models.conversation import (
     ConversationRole,
 )
 from app.db.postgres.repositories.base_repository import BaseRepository
+
+# Chat history retention (used for is_active and message cap)
+CONVERSATION_ACTIVE_DAYS = 10
+MAX_MESSAGES_PER_CONVERSATION = 100
 
 
 class ConversationRepository(BaseRepository[Conversation]):
@@ -84,7 +93,19 @@ class ConversationRepository(BaseRepository[Conversation]):
                     raise
             
             if conversation:
-                return conversation
+                # Keep conversation active only for CONVERSATION_ACTIVE_DAYS from last message
+                cutoff = datetime.now(timezone.utc) - timedelta(days=CONVERSATION_ACTIVE_DAYS)
+                last_activity = conversation.last_message_at or conversation.created_at
+                if last_activity and getattr(last_activity, "tzinfo", None) is None:
+                    # Naive datetime: assume UTC
+                    from datetime import timezone as tz
+                    last_activity = last_activity.replace(tzinfo=tz.utc)
+                if last_activity and last_activity < cutoff:
+                    conversation.is_active = False
+                    self.session.commit()
+                    # Fall through to create a new conversation
+                else:
+                    return conversation
 
             # Create new conversation
             conversation = Conversation(
@@ -131,6 +152,7 @@ class ConversationRepository(BaseRepository[Conversation]):
             raise ValueError("conversation_id cannot be None")
 
         with self._handle_errors():
+            now = datetime.now(timezone.utc)
             message = ChatMessage(
                 id=uuid.uuid4(),
                 conversation_id=conversation_id,
@@ -141,21 +163,66 @@ class ConversationRepository(BaseRepository[Conversation]):
 
             self.session.add(message)
 
-            # Atomic counter update using update() statement
+            # Update conversation: message_count + 1, last_message_at = now
             from sqlalchemy import update
             stmt = (
                 update(Conversation)
                 .where(Conversation.id == conversation_id)
-                .values(message_count=Conversation.message_count + 1)
+                .values(
+                    message_count=Conversation.message_count + 1,
+                    last_message_at=now,
+                )
             )
             self.session.execute(stmt)
 
             self.session.commit()
             self.session.refresh(message)
 
+            # Prune to latest MAX_MESSAGES_PER_CONVERSATION (delete oldest messages)
+            self._prune_messages_if_needed(conversation_id)
+
             return message
 
- 
+    def _prune_messages_if_needed(self, conversation_id: UUID) -> None:
+        """
+        Keep only the latest MAX_MESSAGES_PER_CONVERSATION messages.
+        Deletes oldest messages in the same transaction (commit already done above, so we need a new one).
+        """
+        with self._handle_errors():
+            count_query = select(func.count()).select_from(ChatMessage).where(
+                ChatMessage.conversation_id == conversation_id
+            )
+            total = self.session.execute(count_query).scalar() or 0
+            if total <= MAX_MESSAGES_PER_CONVERSATION:
+                return
+            # Get created_at of the 100th-newest message (so we delete everything older)
+            cutoff_subq = (
+                select(ChatMessage.created_at)
+                .where(ChatMessage.conversation_id == conversation_id)
+                .order_by(desc(ChatMessage.created_at))
+                .offset(MAX_MESSAGES_PER_CONVERSATION)
+                .limit(1)
+            )
+            result = self.session.execute(cutoff_subq)
+            row = result.fetchone()
+            if not row:
+                return
+            cutoff_at = row[0]
+            stmt = delete(ChatMessage).where(
+                and_(
+                    ChatMessage.conversation_id == conversation_id,
+                    ChatMessage.created_at < cutoff_at,
+                )
+            )
+            self.session.execute(stmt)
+            from sqlalchemy import update
+            self.session.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation_id)
+                .values(message_count=MAX_MESSAGES_PER_CONVERSATION)
+            )
+            self.session.commit()
+
     def _format_message(
         self,
         msg: ChatMessage,

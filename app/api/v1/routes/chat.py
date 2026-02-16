@@ -16,7 +16,10 @@ from app.schemas import BuyerEnquiry
 from app.services.rag_pipeline.preprocess import preprocess_enquiry, detect_query_source
 from app.services.rag_pipeline.generation import ResponseGenerator
 from app.db.session import get_db
-from app.db.postgres.repositories.conversation_repository import ConversationRepository
+from app.db.postgres.repositories.conversation_repository import (
+    ConversationRepository,
+    MAX_MESSAGES_PER_CONVERSATION,
+)
 from app.db.models.conversation import ConversationRole
 from sqlalchemy.orm import Session
 
@@ -141,13 +144,14 @@ async def chat_message(
             
             conversation_history = conversation_repo.get_recent_messages(
                 conversation_id=conversation.id,
-                n_messages=10,
+                n_messages=MAX_MESSAGES_PER_CONVERSATION,  # Latest 100 messages (retention cap)
             )
             
-            # Detect query type using conversation history
+            # Detect query type using conversation history (pass listing_id to skip LLM when on listing page)
             source = detect_query_source(
                 request.question,
                 conversation_history=conversation_history,
+                listing_id=str(request.listing_id) if request.listing_id else None,
             )
             is_generic_query = (source == "generic")
             
@@ -167,7 +171,11 @@ async def chat_message(
                 print("📧 Enquiry message - no conversation history will be saved")
             else:
                 print("🔓 Anonymous user - no conversation history will be saved")
-            source = detect_query_source(request.question, conversation_history=[])
+            source = detect_query_source(
+                request.question,
+                conversation_history=[],
+                listing_id=str(request.listing_id) if request.listing_id else None,
+            )
             is_generic_query = (source == "generic")
 
         enquiry = BuyerEnquiry(
@@ -348,7 +356,7 @@ async def get_conversation_history(
 
         messages = conversation_repo.get_conversation_messages(
             conversation_id=conversation.id,
-            limit=40,
+            limit=MAX_MESSAGES_PER_CONVERSATION,  # Latest 100 messages
             include_metadata=True,
         )
 

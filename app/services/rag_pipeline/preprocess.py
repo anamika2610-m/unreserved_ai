@@ -461,21 +461,27 @@ def _is_obviously_property(query_lower: str) -> bool:
     return False
 
 
-def detect_query_source(query: str, conversation_history: Optional[List[Dict[str, str]]] = None) -> str:
+def detect_query_source(
+    query: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    listing_id: Optional[str] = None,
+) -> str:
     """
     Detect if query needs generic knowledge OR property-specific info.
     Uses hybrid approach: regex for obvious cases, LLM for ambiguous ones.
+    Same logic runs whether or not listing_id is present (query source identified properly).
     
     Args:
         query: The user's query
         conversation_history: Recent conversation messages for context
+        listing_id: Optional; kept for API compatibility, not used to skip LLM
     
     Returns:
         'generic': Query about general real estate knowledge
         'property': Query about specific property (default)
     """
     query_lower = query.lower()
-    
+
     # Handle follow-up responses like "yes", "tell me more"
     # Normalize query: strip trailing question marks and whitespace
     query_normalized = query_lower.strip().rstrip('?').strip()

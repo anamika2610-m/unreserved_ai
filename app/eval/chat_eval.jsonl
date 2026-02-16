@@ -1,0 +1,9 @@
+{"id": "q1_floor_size", "query": "What is the floor size of this property?", "listing_id": "950b945a-5604-49a0-9cf9-3d3c16cf9c1a", "task_type": "chat_generic"}
+{"id": "q2_bedrooms", "query": "How many bedrooms does this property have?", "listing_id": "0d824a89-147e-436e-817e-804a4bc488d1", "task_type": "chat_generic"}
+{"id": "q3_zoning", "query": "What is the zoning for this property?", "listing_id": "0d824a89-147e-436e-817e-804a4bc488d1", "task_type": "chat_generic"}
+{"id": "q4_nearby_sold", "query": "nearby properties sold", "listing_id": "0d824a89-147e-436e-817e-804a4bc488d1", "task_type": "chat_generic", "group_id": "nearby_sold"}
+{"id": "q5_nearby_sold_variant", "query": "What properties nearby have sold recently?", "listing_id": "0d824a89-147e-436e-817e-804a4bc488d1", "task_type": "chat_generic", "group_id": "nearby_sold"}
+{"id": "q6_generic_underquoting", "query": "What are the underquoting laws in Victoria?", "listing_id": null, "task_type": "chat_generic_generic_pdf"}
+{"id": "q7_enquiry_price_hidden", "query": "What is the price of this property?", "listing_id": "950b945a-5604-49a0-9cf9-3d3c16cf9c1a", "task_type": "chat_price_hidden"}
+{"id": "q8_tone_urgent", "query": "How soon do I need to make a decision on this property?", "listing_id": "0d824a89-147e-436e-817e-804a4bc488d1", "task_type": "chat_generic"}
+

@@ -9,12 +9,15 @@ import app.config  # noqa: F401
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
+
+from sqlalchemy import desc
+from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.db.postgres.repositories.conversation_repository import ConversationRepository
-from sqlalchemy.orm import Session
+from app.db.models.cron_job_run import CronJobRun
 
 
 # ------------------------------------------------------------------------------
@@ -229,22 +232,143 @@ async def trigger_summary_generation(
     """
     try:
         from app.services.summary_cron_service import SummaryCronService
-        
+
         cron_service = SummaryCronService()
         results = cron_service.run_nightly_summary_job(
             days_required=days_required,
             max_listings=max_listings
         )
-        
+
+        # Record successful run for real-time cron status
+        run = CronJobRun(
+            job_name="chat_summary",
+            ran_at=datetime.now(timezone.utc),
+            status="200",
+            message=None,
+        )
+        db.add(run)
+        db.commit()
+
         return SummaryJobResponse(**results)
-        
+
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
         print(f"❌ Error in summary generation job: {type(e).__name__}: {str(e)}")
         print(f"Full traceback:\n{error_details}")
-        
+
+        # Record failed run for real-time cron status
+        try:
+            run = CronJobRun(
+                job_name="chat_summary",
+                ran_at=datetime.now(timezone.utc),
+                status="500",
+                message=str(e)[:500],
+            )
+            db.add(run)
+            db.commit()
+        except Exception:
+            pass
+
         raise HTTPException(
             status_code=500,
             detail=f"Error running summary generation job: {str(e)}",
         )
+
+
+# ------------------------------------------------------------------------------
+# Cron job status (for checking if chat summary cron is running)
+# ------------------------------------------------------------------------------
+class CronStatusResponse(BaseModel):
+    """Response model for cron job status."""
+    
+    job_name: str = Field(..., description="Name of the cron job")
+    schedule: str = Field(..., description="Expected schedule (e.g. daily at 10:00)")
+    endpoint: str = Field(..., description="Endpoint that the cron calls")
+    ready: bool = Field(..., description="Whether the summary generation endpoint is available")
+    last_run_at: Optional[str] = Field(None, description="Last run timestamp (from database)")
+    last_run_status: Optional[str] = Field(None, description="Last run HTTP status or outcome")
+
+
+def _get_last_cron_run(db: Session, job_name: str = "chat_summary") -> tuple[Optional[str], Optional[str]]:
+    """Read last run from database. Returns (last_run_at_iso, last_run_status)."""
+    row = (
+        db.query(CronJobRun)
+        .filter(CronJobRun.job_name == job_name)
+        .order_by(desc(CronJobRun.ran_at))
+        .limit(1)
+        .first()
+    )
+    if not row:
+        return None, None
+    ran_at_iso = row.ran_at.isoformat() if row.ran_at.tzinfo else row.ran_at.replace(tzinfo=timezone.utc).isoformat()
+    return ran_at_iso, row.status
+
+
+class CronLastRunRequest(BaseModel):
+    """
+    Body for POST /cron/last-run. Used by the cron script to report when it ran.
+    To fetch last run info, use GET /cron/status instead.
+    """
+    last_run_at: str = Field(
+        ...,
+        description="ISO8601 timestamp when the cron ran (e.g. 2026-02-12T11:30:00+0530)",
+    )
+    status: str = Field(
+        ...,
+        description="HTTP status from the summary job, e.g. 200 or 500",
+    )
+
+    model_config = {"json_schema_extra": {"example": {"last_run_at": "2026-02-12T11:30:00+0530", "status": "200"}}}
+
+
+@router.post(
+    "/cron/last-run",
+    response_model=Dict[str, str],
+)
+async def register_cron_last_run(body: CronLastRunRequest, db: Session = Depends(get_db)) -> Dict[str, str]:
+    """
+    **Report** when the cron job last ran (called by external cron script after each run).
+
+    Saves the run to the database so **GET /api/v1/admin/cron/status** returns real-time last run info.
+    """
+    try:
+        ran_at = datetime.fromisoformat(body.last_run_at.replace("Z", "+00:00"))
+        if ran_at.tzinfo is None:
+            ran_at = ran_at.replace(tzinfo=timezone.utc)
+    except Exception:
+        ran_at = datetime.now(timezone.utc)
+    run = CronJobRun(
+        job_name="chat_summary",
+        ran_at=ran_at,
+        status=body.status,
+        message=None,
+    )
+    db.add(run)
+    db.commit()
+    return {"status": "ok", "last_run_at": body.last_run_at}
+
+
+@router.get(
+    "/cron/status",
+    response_model=CronStatusResponse,
+)
+async def get_cron_status(db: Session = Depends(get_db)) -> CronStatusResponse:
+    """
+    Real-time cron status: when the chat summary job last ran and its outcome.
+    Last run is recorded in the database when:
+    - POST /api/v1/admin/summaries/generate runs (success or failure), or
+    - POST /api/v1/admin/cron/last-run is called by an external cron script.
+
+    **Schedule:** Daily at 11:20 AM (crontab: 20 11 * * *)
+    """
+    last_run_at, last_run_status = _get_last_cron_run(db, job_name="chat_summary")
+
+    return CronStatusResponse(
+        job_name="chat_summary",
+        schedule="daily at 11:20 AM",
+        endpoint="/api/v1/admin/summaries/generate",
+        ready=True,
+        last_run_at=last_run_at,
+        last_run_status=last_run_status,
+    )

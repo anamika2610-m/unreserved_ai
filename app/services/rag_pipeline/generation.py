@@ -2,6 +2,7 @@
 Generation module for creating AI responses to buyer enquiries.
 """
 import re
+import time
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 
@@ -14,6 +15,8 @@ from app.services.rag_pipeline.prompts import (
     SYSTEM_PROMPT,
     GENERIC_SYSTEM_PROMPT,
     ENQUIRY_EMAIL_SYSTEM_PROMPT,
+    CONVERSATIONAL_SYSTEM_PROMPT,
+    INTENT_CLASSIFIER_SYSTEM,
     create_user_prompt,
     create_bid_advice_prompt,
     create_enquiry_email_user_prompt,
@@ -31,9 +34,16 @@ from app.services.tone_adaptation_service import ToneAdaptationService, ToneLeve
 
 # Constants
 CONVERSATIONAL_PHRASES = [
-    'recording', 'testing', 'test', 'checking', 'see how', 'let\'s see', 
+    'recording', 'testing', 'test', 'checking', 'see how', 'let\'s see',
     'just testing', 'trying out', 'how does this work', 'how does it work',
-    'chatbot usage', 'for my chatbot'
+    'chatbot usage', 'for my chatbot',
+]
+# Short acknowledgments / positive reactions – respond conversationally, no retrieval
+ACKNOWLEDGMENT_PHRASES = [
+    'nice', 'good', 'great', 'thanks', 'thank you', 'sounds good', 'cool',
+    'lovely', 'good to know', 'good features', 'that is good', "that's good",
+    'that is good features', 'perfect', 'awesome', 'appreciate it', 'noted',
+    'got it', 'understood', 'that helps', 'helpful', 'cheers', 'sweet',
 ]
 
 NEGOTIATION_KEYWORDS = [
@@ -135,51 +145,76 @@ class ResponseGenerator:
         data_sources = []
         location_context = None
         query_source = 'property'
-        
-        # 0️⃣ Check for conversational/test queries FIRST (before any retrieval)
+        t_start = time.perf_counter()
+        t_llm_start = None  # set right before main LLM call for eval latency breakdown
+        timings_breakdown: Dict[str, float] = {}
+
+        # 0️⃣ Check for conversational / acknowledgment queries FIRST (before any retrieval)
         query_lower = query.lower()
+        query_stripped = query_lower.strip().rstrip('?!.,').strip()
         is_conversational = any(phrase in query_lower for phrase in CONVERSATIONAL_PHRASES)
-        
-        if is_conversational:
-            # Conversational query - return friendly message immediately, no retrieval or LLM call needed
-            print("✅ Conversational query detected → returning friendly welcome message (skipping retrieval)")
-            answer = (
-                "I'm here and ready to help! I can answer questions about property listings, "
-                "real estate processes, legal requirements, and general real estate knowledge in Victoria. "
-                "What would you like to know?"
-            )
-            
+        is_acknowledgment = (
+            len(query_stripped) <= 50
+            and any(phrase in query_lower for phrase in ACKNOWLEDGMENT_PHRASES)
+        )
+
+        def _do_conversational_reply() -> Dict[str, Any]:
+            try:
+                answer = self._generate_conversational_reply(query, conversation_history)
+            except Exception as e:
+                print(f"⚠️ Conversational LLM fallback error: {e}")
+                answer = (
+                    "Glad that helped! Is there anything else you'd like to know about this property?"
+                )
+            if not answer:
+                answer = (
+                    "Glad that helped! Is there anything else you'd like to know about this property?"
+                )
             ai_response = sanitize_response(
                 AIResponse(
                     answer=answer,
                     needs_vendor_contact=False,
-                    escalation_reason="Conversational/test query",
+                    escalation_reason="Conversational reply (LLM)",
                     data_sources=[],
                 )
             )
-            
             log_entry = EnquiryLog(
                 question=query,
                 answer=answer,
-            listing_id=listing_id,
+                listing_id=listing_id,
                 user_id=user_id,
                 data_sources=[],
                 needs_vendor_contact=False,
-                escalation_reason="Conversational/test query",
+                escalation_reason="Conversational reply (LLM)",
                 model_version=self.model_name,
                 prompt_version=PROMPT_VERSION,
                 timestamp=datetime.now(),
             )
-            
             return {
                 "ai_response": ai_response,
                 "log_entry": log_entry,
                 "nearby_properties": [],
                 "amenity_links": [],
             }
-        
+
+        if is_conversational or is_acknowledgment:
+            print("✅ Conversational/acknowledgment detected → LLM replying naturally (skipping retrieval)")
+            return _do_conversational_reply()
+
+        # For short or ambiguous messages, let the LLM decide if this needs listing data or is conversational
+        word_count = len(query_stripped.split())
+        char_count = len(query_stripped)
+        is_short_or_ambiguous = word_count <= 12 or char_count <= 80
+        if is_short_or_ambiguous:
+            intent = self._classify_intent_listing_vs_conversational(query, conversation_history)
+            if intent == "conversational":
+                print("✅ Intent classifier → conversational (skipping retrieval)")
+                return _do_conversational_reply()
+
         # 0.5️⃣ Check for greetings FIRST (before any routing)
+        _t = time.perf_counter()
         enquiry_type = detect_enquiry_type(query)
+        timings_breakdown["detect_enquiry_type_ms"] = (time.perf_counter() - _t) * 1000.0
         if enquiry_type == "greeting":
             print("👋 Greeting detected → returning friendly welcome message")
             answer = (
@@ -245,8 +280,13 @@ class ResponseGenerator:
             }
         
         # 2️⃣ Detect query source (property vs generic)
-        # Check if it's a clear generic legal/process question
-        query_source_detected = detect_query_source(query, conversation_history=conversation_history)
+        _t = time.perf_counter()
+        query_source_detected = detect_query_source(
+            query,
+            conversation_history=conversation_history,
+            listing_id=listing_id,
+        )
+        timings_breakdown["detect_query_source_ms"] = (time.perf_counter() - _t) * 1000.0
         
         # Strong generic indicators (legal/process questions that should skip property data entirely)
         is_strong_generic = any(kw in query.lower() for kw in STRONG_GENERIC_KEYWORDS)
@@ -258,12 +298,14 @@ class ResponseGenerator:
         # This includes both strong generic keywords AND queries routed to generic by detect_query_source
         if is_strong_generic or query_source_detected == 'generic':
             print(f"🔍 Step 1: Generic query detected (is_strong_generic={is_strong_generic}, query_source={query_source_detected}) → trying generic knowledge store first")
+            _t = time.perf_counter()
             generic_context, generic_data_sources, _ = self.augmenter.augment_query(
                 query=query,
                 listing_id=None,
                 n_results=n_retrieval_results,
                 query_source='generic'
             )
+            timings_breakdown["augment_generic_ms"] = (time.perf_counter() - _t) * 1000.0
             
             if generic_data_sources and generic_context and generic_context.strip():
                 print(f"✅ Generic knowledge found → using generic data")
@@ -318,6 +360,7 @@ class ResponseGenerator:
             if listing_id:
                 # 🚨 PRICE VISIBILITY CHECK: Fetch displayPrice from database
                 display_price = True  # Default to True if we can't fetch
+                _t_db = time.perf_counter()
                 try:
                     from app.db.postgres.repositories.listing_repository import ListingRepository
                     from app.db.session import SessionLocal
@@ -336,15 +379,18 @@ class ResponseGenerator:
                         db_session.close()
                 except Exception as e:
                     print(f"⚠️  Failed to fetch displayPrice from database: {type(e).__name__}: {e}")
+                timings_breakdown["display_price_db_ms"] = (time.perf_counter() - _t_db) * 1000.0
                     # Default to True (show price) if we can't fetch - safer default
                 
                 print(f"🔍 Step 1/4: Trying property JSON chunks (listing_id: {listing_id})")
                 print(f"           → This includes: overview, pricing, specifications, location chunks (excludes property_document)")
+                _t = time.perf_counter()
                 property_json_context, property_json_data_sources, property_location_context = self.augmenter.augment_query_json_chunks(
                     query=query,
                     listing_id=listing_id,
                     n_results=n_retrieval_results
                 )
+                timings_breakdown["augment_json_ms"] = (time.perf_counter() - _t) * 1000.0
                 
                 # 🚨 RETRIEVAL LAYER ENFORCEMENT: Filter out price chunks if displayPrice = false
                 if not display_price and enquiry_type == "price":
@@ -415,12 +461,13 @@ class ResponseGenerator:
                         print(f"⚠️  Step 1/4: JSON chunks found but INSUFFICIENT for document query")
                         print(f"           → Reason: {insufficiency_reason}")
                         print(f"🔍 Step 2/4: Skipping JSON → Trying ONLY property-specific PDFs (document query)")
-                        
+                        _t = time.perf_counter()
                         property_pdf_context, property_pdf_data_sources, property_location_context = self.augmenter.augment_query_pdf_chunks(
                             query=query,
                             listing_id=listing_id,
                             n_results=n_retrieval_results
                         )
+                        timings_breakdown["augment_pdf_ms"] = timings_breakdown.get("augment_pdf_ms", 0) + (time.perf_counter() - _t) * 1000.0
                         
                         # Check if property PDF data is sufficient
                         if property_pdf_data_sources:
@@ -485,12 +532,13 @@ class ResponseGenerator:
                             print(f"⚠️  Step 1/4: JSON data found but may be insufficient for full answer")
                             print(f"           → Reason: {insufficiency_reason}")
                             print(f"🔍 Step 2/4: Trying property-specific PDFs to SUPPLEMENT JSON data")
-                            
+                            _t = time.perf_counter()
                             property_pdf_context, property_pdf_data_sources, _ = self.augmenter.augment_query_pdf_chunks(
                                 query=query,
                                 listing_id=listing_id,
                                 n_results=n_retrieval_results
                             )
+                            timings_breakdown["augment_pdf_ms"] = timings_breakdown.get("augment_pdf_ms", 0) + (time.perf_counter() - _t) * 1000.0
                             
                             if property_pdf_data_sources:
                                 print(f"           → Found {len(property_pdf_data_sources)} PDF chunks to supplement")
@@ -520,11 +568,13 @@ class ResponseGenerator:
                         
                         # Step 2/4: Try property-specific PDFs (only if NO JSON data exists)
                         print(f"🔍 Step 2/4: No JSON data → Trying property-specific PDFs (property_document chunks)")
+                        _t = time.perf_counter()
                         property_pdf_context, property_pdf_data_sources, property_location_context = self.augmenter.augment_query_pdf_chunks(
                             query=query,
                             listing_id=listing_id,
                             n_results=n_retrieval_results
                         )
+                        timings_breakdown["augment_pdf_ms"] = timings_breakdown.get("augment_pdf_ms", 0) + (time.perf_counter() - _t) * 1000.0
                         
                         # Check if property PDF data is sufficient
                         if property_pdf_data_sources:
@@ -981,7 +1031,8 @@ class ResponseGenerator:
         needs_vendor_contact = False
         escalation_reason = None
         rate_limit_error = False
-        
+        t_llm_start = time.perf_counter()
+
         try:
             response = create_chat_completion(
                 messages=messages,
@@ -1160,12 +1211,26 @@ class ResponseGenerator:
                     print(f"🏘️  User asked about nearby properties - including {len(nearby_properties_json)} properties in response")
             else:
                 print(f"✅ User did not ask about nearby properties - excluding from response (query_type: {query_type})")
-        
+
+        now = time.perf_counter()
+        # Merge retriever's fine-grained timers (from last retrieve call) into breakdown
+        try:
+            for k, v in getattr(self.augmenter.retriever, "_last_timings", {}).items():
+                timings_breakdown[f"retrieval_{k}"] = round(v, 2)
+        except Exception:
+            pass
+        eval_timings = {
+            "retrieval_ms": (t_llm_start - t_start) * 1000.0 if t_llm_start is not None else 0.0,
+            "llm_ms": (now - t_llm_start) * 1000.0 if t_llm_start is not None else 0.0,
+            "total_ms": (now - t_start) * 1000.0,
+            "breakdown": {k: round(v, 2) for k, v in timings_breakdown.items()},
+        }
         return {
             "ai_response": ai_response,
             "log_entry": log_entry,
             "nearby_properties": nearby_properties_json,
             "amenity_links": final_amenity_links,
+            "eval_timings": eval_timings,
         }
     
     # ------------------------------------------------------------------
@@ -1266,6 +1331,60 @@ class ResponseGenerator:
                 lines.append(f"**{name}**")
 
         return lines
+
+    def _generate_conversational_reply(
+        self,
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
+        """Let the LLM respond naturally to conversational messages (thanks, nice, small talk). No retrieval."""
+        messages = [{"role": "system", "content": CONVERSATIONAL_SYSTEM_PROMPT}]
+        if conversation_history:
+            for msg in conversation_history:
+                role = (msg.get("role") or "user").lower()
+                if role not in ("user", "assistant"):
+                    role = "user"
+                content = msg.get("content") or ""
+                if content.strip():
+                    messages.append({"role": role, "content": content.strip()})
+        messages.append({"role": "user", "content": query})
+        response = create_chat_completion(
+            messages=messages,
+            model=self.model_config["model"],
+            temperature=self.model_config["temperature"],
+            max_tokens=min(150, self.model_config["max_tokens"]),
+        )
+        return (response.choices[0].message.content or "").strip()
+
+    def _classify_intent_listing_vs_conversational(
+        self,
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
+        """Classify whether the user message needs listing data (LISTING) or is conversational (CONVERSATIONAL). Returns 'listing' or 'conversational'."""
+        user_content = f"User message: {query.strip()}"
+        if conversation_history:
+            recent = conversation_history[-4:]  # last 2 exchanges
+            if recent:
+                parts = [f"{m.get('role', 'user')}: {m.get('content', '')}" for m in recent]
+                user_content = "Recent conversation:\n" + "\n".join(parts) + "\n\n" + user_content
+        messages = [
+            {"role": "system", "content": INTENT_CLASSIFIER_SYSTEM},
+            {"role": "user", "content": user_content},
+        ]
+        try:
+            response = create_chat_completion(
+                messages=messages,
+                model=self.model_config["model"],
+                temperature=0,
+                max_tokens=10,
+            )
+            raw = (response.choices[0].message.content or "").strip().upper()
+            if "CONVERSATIONAL" in raw:
+                return "conversational"
+            return "listing"
+        except Exception:
+            return "listing"
 
     def _generate_personal_advice_message(self, query: str) -> str:
         return (
