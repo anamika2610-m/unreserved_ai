@@ -1,9 +1,10 @@
 #!/bin/bash
-# Cron job script for generating listing summaries
-# Run this script every night via cron: 0 2 * * * /path/to/summary_cron.sh
+# Chat summary cron job – runs daily at 11:20 AM
+# Crontab: 20 11 * * * /path/to/infra/scripts/summary_cron.sh
 
-# Set working directory
-cd "$(dirname "$0")/../../"
+# Set working directory to project root
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "${SCRIPT_DIR}/../../"
 
 # Activate virtual environment if it exists
 if [ -d ".venv" ]; then
@@ -16,29 +17,54 @@ if [ -f ".env" ]; then
 fi
 
 # Call the API endpoint to trigger summary generation
-# Adjust the URL and port as needed
-API_URL="${API_URL:-http://localhost:8000}"
+# API_URL: from env or default http://127.0.0.1:8000; localhost → 127.0.0.1 to avoid IPv6 (::1) issues
+API_URL="$(echo "${API_URL:-http://127.0.0.1:8000}" | sed 's/localhost/127.0.0.1/g')"
 ENDPOINT="${API_URL}/api/v1/admin/summaries/generate"
 
-echo "$(date): Starting summary generation cron job"
+# Optional: file to record last run for GET /api/v1/admin/cron/status
+CRON_LAST_RUN_FILE="${CRON_LAST_RUN_FILE:-/tmp/unreserved_summary_cron_last_run.txt}"
+
+echo "$(date '+%Y-%m-%dT%H:%M:%S%z'): Starting summary generation cron job"
 echo "Calling endpoint: ${ENDPOINT}"
 
-# Make the API call
+# Preflight: check that the API is reachable before running the long summary job
+if ! curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "${API_URL}/health" | grep -q 200; then
+    echo "ERROR: API not reachable at ${API_URL}. Start the server with: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"
+    exit 1
+fi
+
+# Make the API call (long timeout: summary job can take minutes due to LLM calls)
 response=$(curl -s -X POST "${ENDPOINT}?days_required=7" \
     -H "Content-Type: application/json" \
+    --connect-timeout 15 \
+    --max-time 600 \
     -w "\nHTTP_STATUS:%{http_code}")
 
 # Extract HTTP status
 http_status=$(echo "$response" | grep "HTTP_STATUS" | cut -d: -f2)
 body=$(echo "$response" | sed '/HTTP_STATUS/d')
 
+# Status 000 = curl could not connect (server down, wrong host, or timeout)
+if [ -z "$http_status" ] || [ "$http_status" = "000" ]; then
+    echo "$(date '+%Y-%m-%dT%H:%M:%S%z'): ERROR - Could not reach API (status 000). Is the server running at ${API_URL}?"
+    echo "  Check: curl -s -o /dev/null -w '%{http_code}' ${API_URL}/health"
+    exit 1
+fi
+
+# Register last run with the API so GET /api/v1/admin/cron/status shows it (works when API and cron share same server)
+LAST_RUN_AT=$(date '+%Y-%m-%dT%H:%M:%S%z')
+curl -s -X POST "${API_URL}/api/v1/admin/cron/last-run" \
+    -H "Content-Type: application/json" \
+    -d "{\"last_run_at\": \"${LAST_RUN_AT}\", \"status\": \"${http_status}\"}" \
+    > /dev/null || true
+
 if [ "$http_status" = "200" ]; then
-    echo "$(date): Summary generation completed successfully"
+    echo "$(date '+%Y-%m-%dT%H:%M:%S%z'): Summary generation completed successfully"
     echo "Response: $body"
 else
-    echo "$(date): ERROR - Summary generation failed with status $http_status"
+    echo "$(date '+%Y-%m-%dT%H:%M:%S%z'): ERROR - Summary generation failed with HTTP status $http_status"
     echo "Response: $body"
     exit 1
 fi
 
-echo "$(date): Cron job completed"
+echo "$(date '+%Y-%m-%dT%H:%M:%S%z'): Cron job completed"

@@ -327,44 +327,53 @@ class PropertyListingChunker:
         return "\n".join(parts)
     
     def _create_pricing_chunk(self, listing: Dict[str, Any]) -> Optional[str]:
-        """Create a pricing-specific chunk."""
+        """Create a pricing-specific chunk for private_sale, live_auction, and reverse_auction (bot answers starting price from these)."""
         parts = []
-        
-        listing_type = listing.get('listingType', '')
+        listing_type = (listing.get('listingType') or '').strip().lower()
         price = listing.get('price')
         display_price = listing.get('displayPrice', False)
         auction_start_price = listing.get('auctionStartPrice')
-        
-        if listing_type == 'auction':
-            parts.append("Sale Method: Auction")
-            if auction_start_price:
+
+        # Pricing chunks only for these types; bot uses them to answer starting price / pricing.
+        if listing_type in ('auction', 'live_auction'):
+            parts.append("Sale Method: Live Auction" if listing_type == 'live_auction' else "Sale Method: Auction")
+            if auction_start_price is not None:
                 parts.append(f"Auction Start Price: ${auction_start_price:,.0f}" if isinstance(auction_start_price, (int, float)) else f"Auction Start Price: {auction_start_price}")
             if listing.get('auctionStartDate'):
                 parts.append(f"Auction Start: {listing.get('auctionStartDate')}")
-        elif listing_type == 'private_sale':
-            parts.append("Sale Method: Private Sale")
-            if price and display_price:
+        elif listing_type in ('private_sale', 'direct'):
+            parts.append("Sale Method: Private Sale" if listing_type == 'private_sale' else "Sale Method: Direct")
+            if price is not None and display_price:
                 parts.append(f"Asking Price: ${price:,.0f}" if isinstance(price, (int, float)) else f"Asking Price: {price}")
-            elif price and not display_price:
+            elif price is not None and not display_price:
                 parts.append("Price: Contact agent for pricing")
-        
+        elif listing_type == 'reverse_auction':
+            parts.append("Sale Method: Reverse Auction")
+            if price is not None:
+                parts.append(f"Price: ${price:,.0f}" if isinstance(price, (int, float)) else f"Price: {price}")
+            elif not display_price:
+                parts.append("Price: Contact agent for pricing")
+        else:
+            # No pricing chunk for other listing types
+            return None
+
         # Current bidding status
         active_bid_count = listing.get('activeBidCount') or 0
         if active_bid_count > 0:
             parts.append(f"Active Bids: {active_bid_count}")
             if listing.get('highestBidAmount'):
                 parts.append(f"Highest Bid: ${listing.get('highestBidAmount'):,.0f}" if isinstance(listing.get('highestBidAmount'), (int, float)) else f"Highest Bid: {listing.get('highestBidAmount')}")
-        
+
         active_offer_count = listing.get('activeOfferCount') or 0
         if active_offer_count > 0:
             parts.append(f"Active Offers: {active_offer_count}")
-        
+
         # Reverse auction info
         if listing.get('reverseAuctionNextDecreaseAt'):
             parts.append(f"Reverse Auction: Next decrease at {listing.get('reverseAuctionNextDecreaseAt')}")
             if listing.get('reverseAuctionDecreaseAmount'):
                 parts.append(f"Decrease Amount: ${listing.get('reverseAuctionDecreaseAmount'):,.0f}" if isinstance(listing.get('reverseAuctionDecreaseAmount'), (int, float)) else f"Decrease Amount: {listing.get('reverseAuctionDecreaseAmount')}")
-        
+
         return "\n".join(parts) if parts else None
     
     def _create_specifications_chunk(self, listing: Dict[str, Any]) -> Optional[str]:

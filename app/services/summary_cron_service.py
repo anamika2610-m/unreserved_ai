@@ -268,3 +268,7 @@ class SummaryCronService:
             db_session.close()
         
         return results
+if __name__ == "__main__":
+    service = SummaryCronService()
+    result = service.run_nightly_summary_job()
+    print(result)

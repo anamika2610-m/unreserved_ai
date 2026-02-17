@@ -4,12 +4,17 @@ SAFE version with strict factual retrieval guarantees.
 Includes location-based retrieval for nearby properties and amenities.
 Now using pgvector (PostgreSQL native vector storage) instead of ChromaDB.
 """
+import logging
+import re
+import time
 from contextlib import contextmanager
 from typing import List, Dict, Any, Optional, Tuple
-import re
-import traceback
 
 from app.helpers.ingestion_pipeline.property.pgvector_store import PgVectorStore
+from app.services.rag_pipeline.config import (
+    DEFAULT_MAX_DISTANCE_KM,
+    DEFAULT_MAX_NEARBY_PROPERTIES,
+)
 from app.services.rag_pipeline.location_utils import (
     detect_location_query,
     get_location_from_chunk,
@@ -17,8 +22,11 @@ from app.services.rag_pipeline.location_utils import (
     find_nearby_properties,
     find_same_suburb_properties,
     format_location_info_for_prompt,
-    format_nearby_properties_json
+    format_nearby_properties_json,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class PropertyRetriever:
@@ -68,6 +76,7 @@ class PropertyRetriever:
             vector_store: Optional PgVectorStore instance. If None, creates a new one.
         """
         self.vector_store = vector_store or PgVectorStore()
+        self._last_timings: Dict[str, float] = {}  # fine-grained timers from last retrieve call
     
     @contextmanager
     def _get_listing_repository(self):
@@ -93,10 +102,10 @@ class PropertyRetriever:
     def _get_location_from_database(self, listing_id: str) -> Optional[Tuple[float, float, str]]:
         """
         Get location (lat, lon, address) from database via repository.
-        
+
         Args:
             listing_id: Listing ID
-            
+
         Returns:
             Tuple of (latitude, longitude, address) or None if not found
         """
@@ -108,46 +117,60 @@ class PropertyRetriever:
                     lat = location_data.get('latitude')
                     lon = location_data.get('longitude')
                     addr = location_data.get('displayAddress') or ''
-                    
+
                     if lat is not None and lon is not None:
                         location = (float(lat), float(lon), addr)
-                        print(f"✅ Got location from database: lat={lat}, lon={lon}, address={addr}")
+                        logger.info(
+                            "✅ Got location from database: lat=%s, lon=%s, address=%s",
+                            lat,
+                            lon,
+                            addr,
+                        )
                         return location
-                    else:
-                        print(f"⚠️  Location data in database is None for listing {listing_id}")
+                    logger.warning(
+                        "⚠️  Location data in database is None for listing %s",
+                        listing_id,
+                    )
                 else:
-                    print(f"⚠️  No location data found for listing {listing_id}")
+                    logger.warning(
+                        "⚠️  No location data found for listing %s",
+                        listing_id,
+                    )
         except Exception as e:
-            print(f"⚠️  Could not fetch location from database: {e}")
-            print(traceback.format_exc())
+            logger.exception("⚠️  Could not fetch location from database for %s: %s", listing_id, e)
         
         return None
     
     def _get_suburb_from_database(self, listing_id: str) -> Optional[str]:
         """
         Get suburb from database via repository.
-        
+
         Args:
             listing_id: Listing ID
-            
+
         Returns:
             Suburb name or None if not found
         """
         try:
             with self._get_listing_repository() as listing_repo:
                 location_data = listing_repo.get_listing_location(listing_id)
-                
+
                 if location_data:
                     suburb = location_data.get('suburb')
                     if suburb:
-                        print(f"✅ Got suburb from database: {suburb}")
+                        logger.info("✅ Got suburb from database: %s", suburb)
                         return suburb
-                    else:
-                        print(f"⚠️  Suburb is None in database for listing {listing_id}")
+                    logger.warning(
+                        "⚠️  Suburb is None in database for listing %s",
+                        listing_id,
+                    )
                 else:
-                    print(f"⚠️  No location data found for listing {listing_id}")
+                    logger.warning(
+                        "⚠️  No location data found for listing %s",
+                        listing_id,
+                    )
         except Exception as e:
-            print(f"⚠️  Could not fetch suburb from database: {e}")
+            logger.exception("⚠️  Could not fetch suburb from database for %s: %s", listing_id, e)
         
         return None
     
@@ -228,14 +251,14 @@ class PropertyRetriever:
     ) -> List[Dict[str, Any]]:
         """
         Fetch nearby properties from database via repository.
-        
+
         Args:
             current_lat: Current latitude
             current_lon: Current longitude
             listing_id: Current listing ID to exclude
             max_distance_km: Maximum distance in km
             max_nearby_properties: Maximum number of properties to return
-            
+
         Returns:
             List of property dictionaries in retrieval format
         """
@@ -248,24 +271,28 @@ class PropertyRetriever:
                     exclude_listing_id=listing_id,
                     limit=max_nearby_properties
                 )
-                
+
                 properties = []
                 for listing in nearby_listings:
                     prop = self._convert_listing_to_retrieval_format(
                         listing,
-                        distance_km=listing.get('distance_km', 0.0)
+                        distance_km=listing.get('distance_km', 0.0),
                     )
                     properties.append(prop)
-                
+
                 if properties:
-                    print(f"✅ Found {len(properties)} nearby properties from database")
+                    logger.info("✅ Found %d nearby properties from database", len(properties))
                     for prop in properties:
-                        print(f"   - {prop['listing_id']}: {prop['address']} ({prop['distance_km']} km away)")
-                
+                        logger.debug(
+                            "   - %s: %s (%s km away)",
+                            prop['listing_id'],
+                            prop['address'],
+                            prop['distance_km'],
+                        )
+
                 return properties
         except Exception as e:
-            print(f"⚠️  Could not fetch nearby properties from database: {e}")
-            print(traceback.format_exc())
+            logger.exception("⚠️  Could not fetch nearby properties from database: %s", e)
             return []
     
     def _fetch_same_suburb_properties_from_database(
@@ -276,12 +303,12 @@ class PropertyRetriever:
     ) -> List[Dict[str, Any]]:
         """
         Fetch same-suburb properties from database via repository.
-        
+
         Args:
             current_suburb: Suburb name
             listing_id: Current listing ID to exclude
             max_nearby_properties: Maximum number of properties to return
-            
+
         Returns:
             List of property dictionaries in retrieval format
         """
@@ -292,23 +319,23 @@ class PropertyRetriever:
                     exclude_listing_id=listing_id,
                     limit=max_nearby_properties
                 )
-                
+
                 properties = []
                 for listing in same_suburb_listings:
                     prop = self._convert_listing_to_retrieval_format(
                         listing,
                         distance_km=None,
-                        same_suburb=True
+                        same_suburb=True,
                     )
                     prop['same_suburb'] = True
                     properties.append(prop)
-                
+
                 if properties:
-                    print(f"✅ Found {len(properties)} same-suburb properties from database")
-                
+                    logger.info("✅ Found %d same-suburb properties from database", len(properties))
+
                 return properties
         except Exception as e:
-            print(f"⚠️  Could not fetch same-suburb properties from database: {e}")
+            logger.exception("⚠️  Could not fetch same-suburb properties from database: %s", e)
             return []
 
     def retrieve(
@@ -321,7 +348,16 @@ class PropertyRetriever:
     ) -> List[Dict[str, Any]]:
         """
         Safe retrieval logic with multi-topic query detection.
+        Embeds the query once and reuses the embedding for all vector searches (reduces latency).
         """
+        self._last_timings = {}
+        t0 = time.perf_counter()
+        # Embed query once and reuse for all searches (avoids N embedding API calls)
+        emb = self.vector_store.embedding_model.encode([query], convert_to_numpy=False)
+        _qe = emb[0] if emb else None
+        query_embedding = (_qe.tolist() if _qe is not None and hasattr(_qe, 'tolist') else (list(_qe) if _qe is not None else None))
+        self._last_timings["embed_ms"] = (time.perf_counter() - t0) * 1000.0
+        t_after_embed = time.perf_counter()
 
         query_lower = query.lower()
         is_price_query = any(k in query_lower for k in self.PRICE_KEYWORDS)
@@ -354,7 +390,8 @@ class PropertyRetriever:
                 type_results = self.vector_store.search(
                     query=query,
                     n_results=per_type_results,
-                    filter_metadata={'listing_id': listing_id, 'chunk_type': chunk_type}
+                    filter_metadata={'listing_id': listing_id, 'chunk_type': chunk_type},
+                    query_embedding=query_embedding,
                 )
                 for r in type_results:
                     if r['id'] not in seen_ids:
@@ -368,13 +405,15 @@ class PropertyRetriever:
                     query=query,
                     n_results=n_results - len(results),
                     listing_id=listing_id,
-                    chunk_types=['overview', 'pricing', 'specifications', 'location', 'attributes', 'amenities']  # Exclude property_document
+                    chunk_types=['overview', 'pricing', 'specifications', 'location', 'attributes', 'amenities'],  # Exclude property_document
+                    query_embedding=query_embedding,
                 )
                 for r in additional:
                     if r['id'] not in seen_ids:
                         results.append(r)
                         seen_ids.add(r['id'])
             
+            self._last_timings["search_rerank_ms"] = (time.perf_counter() - t_after_embed) * 1000.0
             return self._rerank(results, query)[:n_results]
 
         if is_price_query and not is_multi_topic:
@@ -390,11 +429,14 @@ class PropertyRetriever:
         # For amenity queries, search both amenities chunk AND property_document PDFs
         # Property PDFs often contain nearby school/hospital information
         if is_amenity_query and not is_multi_topic and not is_price_query and listing_id:
-            print(f"🏫 Amenity query detected (single-topic, not price)")
-            print(f"   Setting chunk_types=['amenities', 'property_document', 'overview']")
-            print(f"   allow_hybrid=True")
-            chunk_types = ['amenities', 'property_document', 'overview']  # Include property_document for school/hospital info
-            allow_hybrid = True  # Ensure we get all chunks for this listing, then rerank
+            logger.info("🏫 Amenity query detected (single-topic, not price)")
+            logger.debug(
+                "   Setting chunk_types=['amenities', 'property_document', 'overview'], allow_hybrid=True",
+            )
+            # Include property_document for school/hospital info
+            chunk_types = ['amenities', 'property_document', 'overview']
+            # Ensure we get all chunks for this listing, then rerank
+            allow_hybrid = True
         
         # For document queries, explicitly include property_document chunks
         if is_document_query and not is_multi_topic and listing_id:
@@ -406,7 +448,8 @@ class PropertyRetriever:
             doc_results = self.vector_store.search(
                 query=query,
                 n_results=max(3, n_results // 2),
-                filter_metadata={'listing_id': listing_id, 'chunk_type': 'property_document'}
+                filter_metadata={'listing_id': listing_id, 'chunk_type': 'property_document'},
+                query_embedding=query_embedding,
             )
             for r in doc_results:
                 results.append(r)
@@ -416,7 +459,8 @@ class PropertyRetriever:
             other_results = self.vector_store.search(
                 query=query,
                 n_results=n_results - len(results),
-                filter_metadata={'listing_id': listing_id}
+                filter_metadata={'listing_id': listing_id},
+                query_embedding=query_embedding,
             )
             for r in other_results:
                 if r['id'] not in seen_ids:
@@ -431,6 +475,7 @@ class PropertyRetriever:
                         results.append(chunk)
                         seen_ids.add(chunk['id'])
             
+            self._last_timings["search_rerank_ms"] = (time.perf_counter() - t_after_embed) * 1000.0
             return self._rerank(results, query)[:n_results]
 
         filters = {}
@@ -440,26 +485,31 @@ class PropertyRetriever:
             filters['chunk_type'] = chunk_types[0]
 
         # Pass chunk_types directly to search (supports multiple types)
-        print(f"🔍 Calling vector_store.search with:")
-        print(f"   query='{query}'")
-        print(f"   n_results={n_results}")
-        print(f"   listing_id={listing_id}")
-        print(f"   chunk_types={chunk_types}")
-        print(f"   allow_hybrid={allow_hybrid}")
+        logger.debug("🔍 Calling vector_store.search with:")
+        logger.debug("   query='%s'", query)
+        logger.debug("   n_results=%d", n_results)
+        logger.debug("   listing_id=%s", listing_id)
+        logger.debug("   chunk_types=%s", chunk_types)
+        logger.debug("   allow_hybrid=%s", allow_hybrid)
 
         results = self.vector_store.search(
             query=query,
             n_results=n_results,
             listing_id=listing_id,
             chunk_types=chunk_types if chunk_types else None,
-            filter_metadata=filters if filters else None
+            filter_metadata=filters if filters else None,
+            query_embedding=query_embedding,
         )
         
-        print(f"✅ vector_store.search returned {len(results)} results:")
+        logger.info("✅ vector_store.search returned %d results", len(results))
         for i, r in enumerate(results[:5]):  # Show first 5
-            print(f"   [{i+1}] chunk_type={r.get('chunk_type', 'unknown')}, "
-                  f"similarity={r.get('similarity', 0):.3f}, "
-                  f"listing_id={r.get('listing_id', 'N/A')}")
+            logger.debug(
+                "   [%d] chunk_type=%s, similarity=%.3f, listing_id=%s",
+                i + 1,
+                r.get('chunk_type', 'unknown'),
+                r.get('similarity', 0),
+                r.get('listing_id', 'N/A'),
+            )
 
         
         if allow_hybrid and listing_id:
@@ -476,6 +526,7 @@ class PropertyRetriever:
                     results.append(chunk)
                     seen_ids.add(chunk['id'])
 
+        self._last_timings["search_rerank_ms"] = (time.perf_counter() - t_after_embed) * 1000.0
         return self._rerank(results, query)[:n_results]
 
    
@@ -532,8 +583,8 @@ class PropertyRetriever:
         query: str,
         listing_id: str,
         n_results: int = 8,
-        max_distance_km: float = 15.0,
-        max_nearby_properties: int = 5
+        max_distance_km: float = DEFAULT_MAX_DISTANCE_KM,
+        max_nearby_properties: int = DEFAULT_MAX_NEARBY_PROPERTIES,
     ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """
         Retrieve context with location-aware information for nearby queries.
@@ -559,123 +610,110 @@ class PropertyRetriever:
         
         if not is_location_query:
             return standard_results, None
-        
-        current_location = None
-        for result in standard_results:
-            location = get_location_from_chunk(result.get('metadata', {}))
-            if location:
-                current_location = location
-                break
-        
-        if not current_location:
-            listing_chunks = self.vector_store.get_by_listing_id(listing_id)
-            for chunk in listing_chunks:
-                location = get_location_from_chunk(chunk.get('metadata', {}))
-                if location:
-                    current_location = location
-                    break
-        
-        # If still no location, try to get it from database directly via repository
-        if not current_location:
-            current_location = self._get_location_from_database(listing_id)
-        
-        # If we have location, extract coordinates
-        if current_location:
-            current_lat, current_lon, current_address = current_location
-        else:
-            # Even without coordinates, we can still find same-suburb properties if we have suburb
-            current_lat = None
-            current_lon = None
-            current_address = None
-            print(f"⚠️  No location coordinates for listing {listing_id}, but will try same-suburb search if suburb available")
-        
-        # Extract suburb from current property
+
+        # Fetch location and suburb in one DB call (avoids 2x get_by_listing_id and 2x repo calls)
+        t_loc = time.perf_counter()
+        current_lat = None
+        current_lon = None
+        current_address = None
         current_suburb = None
-        for result in standard_results:
-            suburb = get_suburb_from_chunk(result.get('metadata', {}))
-            if suburb:
-                current_suburb = suburb
-                break
-        
+        location_data = None
+        try:
+            with self._get_listing_repository() as listing_repo:
+                location_data = listing_repo.get_listing_location(listing_id)
+                if location_data:
+                    lat, lon = location_data.get('latitude'), location_data.get('longitude')
+                    if lat is not None and lon is not None:
+                        current_lat, current_lon = float(lat), float(lon)
+                    current_address = (location_data.get('displayAddress') or '').strip() or None
+                    current_suburb = (location_data.get('suburb') or '').strip() or None
+        except Exception as e:
+            logger.exception("⚠️  Could not fetch location/suburb for listing %s: %s", listing_id, e)
+        self._last_timings["get_location_ms"] = (time.perf_counter() - t_loc) * 1000.0
+
+        # Fallback: get from retrieval results; only re-query DB if we never got location_data (avoids redundant calls)
+        if current_lat is None and current_lon is None:
+            for result in standard_results:
+                location = get_location_from_chunk(result.get('metadata', {}))
+                if location:
+                    current_lat, current_lon, current_address = location
+                    break
+            if current_lat is None and location_data is None:
+                loc = self._get_location_from_database(listing_id)
+                if loc:
+                    current_lat, current_lon, current_address = loc
         if not current_suburb:
-            listing_chunks = self.vector_store.get_by_listing_id(listing_id)
-            for chunk in listing_chunks:
-                suburb = get_suburb_from_chunk(chunk.get('metadata', {}))
+            for result in standard_results:
+                suburb = get_suburb_from_chunk(result.get('metadata', {}))
                 if suburb:
                     current_suburb = suburb
                     break
-        
-        # If still no suburb, try to get it from database directly via repository
-        if not current_suburb:
-            current_suburb = self._get_suburb_from_database(listing_id)
+            if not current_suburb and location_data is None:
+                current_suburb = self._get_suburb_from_database(listing_id)
         
         nearby_properties = []
         same_suburb_properties = []
-        
+
         if query_type == 'nearby_properties':
-            all_chunks_dict = self.vector_store.get_all_chunks()
-            # get_all_chunks returns {'ids': [...], 'documents': [...], 'metadatas': [...]}
-            # Convert to chunks format: [{'content': ..., 'metadata': ...}, ...]
-            all_properties = [
-                {
-                    'content': doc,
-                    'metadata': meta
-                }
-                for doc, meta in zip(
-                    all_chunks_dict.get('documents', []),
-                    all_chunks_dict.get('metadatas', [])
-                )
-            ]
-            
-            # Only try nearby properties search if we have coordinates
+            # Use database first for nearby/same-suburb (avoids loading all chunks via get_all_chunks())
             nearby_properties_raw = []
             if current_lat is not None and current_lon is not None:
-                print(f"🔍 Searching for nearby properties (lat={current_lat}, lon={current_lon}, max_distance={max_distance_km}km)")
-                nearby_properties_raw = find_nearby_properties(
+                logger.info(
+                    "🔍 Searching for nearby properties (lat=%s, lon=%s, max_distance=%skm)",
+                    current_lat,
+                    current_lon,
+                    max_distance_km,
+                )
+                t_nearby = time.perf_counter()
+                nearby_properties_raw = self._fetch_nearby_properties_from_database(
                     current_lat=current_lat,
                     current_lon=current_lon,
-                    all_properties=all_properties,
+                    listing_id=listing_id,
                     max_distance_km=max_distance_km,
-                    max_results=max_nearby_properties,
-                    current_listing_id=listing_id  # Exclude the current listing from nearby results
+                    max_nearby_properties=max_nearby_properties
                 )
-                print(f"   Found {len(nearby_properties_raw)} nearby properties from chunks")
-                
-                # If no nearby properties found in chunks, try database directly via repository
-                if not nearby_properties_raw:
-                    print(f"⚠️  No nearby properties found in chunks, checking database directly")
-                    nearby_properties_raw = self._fetch_nearby_properties_from_database(
+                self._last_timings["nearby_db_ms"] = (time.perf_counter() - t_nearby) * 1000.0
+                if nearby_properties_raw:
+                    logger.info(
+                        "   Found %d nearby properties from database",
+                        len(nearby_properties_raw),
+                    )
+            if not nearby_properties_raw and current_suburb:
+                logger.info("   Trying same-suburb properties in '%s'", current_suburb)
+                t_suburb = time.perf_counter()
+                same_suburb_properties = self._fetch_same_suburb_properties_from_database(
+                    current_suburb=current_suburb,
+                    listing_id=listing_id,
+                    max_nearby_properties=max_nearby_properties
+                )
+                self._last_timings["same_suburb_db_ms"] = (time.perf_counter() - t_suburb) * 1000.0
+            # Fallback: only load all chunks when DB returned nothing (slow path)
+            if not nearby_properties_raw and not same_suburb_properties:
+                all_chunks_dict = self.vector_store.get_all_chunks()
+                all_properties = [
+                    {'content': doc, 'metadata': meta}
+                    for doc, meta in zip(
+                        all_chunks_dict.get('documents', []),
+                        all_chunks_dict.get('metadatas', [])
+                    )
+                ]
+                if current_lat is not None and current_lon is not None:
+                    nearby_properties_raw = find_nearby_properties(
                         current_lat=current_lat,
                         current_lon=current_lon,
-                        listing_id=listing_id,
+                        all_properties=all_properties,
                         max_distance_km=max_distance_km,
-                        max_nearby_properties=max_nearby_properties
+                        max_results=max_nearby_properties,
+                        current_listing_id=listing_id
                     )
-            else:
-                print(f"⚠️  No coordinates available, skipping nearby properties search")
-            
-            # If no nearby properties found (or no coordinates), check for same-suburb properties
-            if not nearby_properties_raw and current_suburb:
-                print(f"⚠️  No nearby properties found within {max_distance_km}km, checking for same-suburb properties in '{current_suburb}'")
-                same_suburb_properties_raw = find_same_suburb_properties(
-                    current_suburb=current_suburb,
-                    all_properties=all_properties,
-                    max_results=max_nearby_properties,
-                    current_listing_id=listing_id
-                )
-                same_suburb_properties = same_suburb_properties_raw
-                print(f"   Found {len(same_suburb_properties)} same-suburb properties from chunks")
-
-                
-                # If still no same-suburb properties from chunks, try database directly via repository
-                if not same_suburb_properties:
-                    print(f"⚠️  No same-suburb properties found in chunks, checking database directly for suburb '{current_suburb}'")
-                    same_suburb_properties = self._fetch_same_suburb_properties_from_database(
+                if not nearby_properties_raw and current_suburb:
+                    same_suburb_properties = find_same_suburb_properties(
                         current_suburb=current_suburb,
-                        listing_id=listing_id,
-                        max_nearby_properties=max_nearby_properties
+                        all_properties=all_properties,
+                        max_results=max_nearby_properties,
+                        current_listing_id=listing_id
                     )
-            
+
             # Enrich nearby properties with full listing data
             for nearby_prop in nearby_properties_raw:
                 self._enrich_property_with_chunks(nearby_prop)
@@ -694,37 +732,45 @@ class PropertyRetriever:
             # Filter out the current listing from nearby properties (shouldn't be in "nearby" list)
             original_count = len(nearby_properties_json)
             nearby_properties_json = [
-                prop for prop in nearby_properties_json 
+                prop for prop in nearby_properties_json
                 if prop.get('id') != listing_id
             ]
             if len(nearby_properties_json) < original_count:
-                print(f"🏠 Filtered out current listing ({listing_id}) from nearby properties")
-            
-            print(f"📸 Formatted {len(nearby_properties_json)} nearby properties, now fetching property media...")
-            
+                logger.info("🏠 Filtered out current listing (%s) from nearby properties", listing_id)
+
+            logger.info(
+                "📸 Formatted %d nearby properties, now fetching property media...",
+                len(nearby_properties_json),
+            )
+
             # Fetch property media for all nearby properties
             listing_ids = [prop.get('id') for prop in nearby_properties_json if prop.get('id')]
-            print(f"📸 Extracted {len(listing_ids)} listing IDs: {listing_ids}")
-            
+            logger.debug("📸 Extracted %d listing IDs: %s", len(listing_ids), listing_ids)
+
             if listing_ids:
                 try:
                     with self._get_listing_repository() as listing_repo:
                         property_media_dict = listing_repo.get_multiple_listing_property_media(listing_ids)
-                        print(f"📸 Fetched property media for {len(property_media_dict)} listings")
-                        
+                        logger.info(
+                            "📸 Fetched property media for %d listings",
+                            len(property_media_dict),
+                        )
+
                         # Add propertyMedia array to each property
                         for prop in nearby_properties_json:
                             listing_id = prop.get('id')
                             if listing_id and listing_id in property_media_dict:
                                 media_count = len(property_media_dict[listing_id])
                                 prop['propertyMedia'] = property_media_dict[listing_id]
-                                print(f"   ✅ Added {media_count} media items to listing {listing_id}")
+                                logger.debug(
+                                    "   ✅ Added %d media items to listing %s",
+                                    media_count,
+                                    listing_id,
+                                )
                             else:
-                                print(f"   ⚠️  No media found for listing {listing_id}")
+                                logger.debug("   ⚠️  No media found for listing %s", listing_id)
                 except Exception as e:
-                    import traceback
-                    print(f"⚠️  Error fetching nearby property media: {e}")
-                    print(f"⚠️  Traceback: {traceback.format_exc()}")
+                    logger.exception("⚠️  Error fetching nearby property media: %s", e)
         
         location_context = {
             'latitude': current_lat,

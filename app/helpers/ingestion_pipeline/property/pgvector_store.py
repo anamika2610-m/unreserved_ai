@@ -2,15 +2,17 @@
 PostgreSQL pgvector-based vector store for property listings.
 Uses OpenAI embeddings for semantic search.
 """
+import logging
 import os
 import time
-from typing import List, Dict, Any, Optional
 from decimal import Decimal
+from typing import List, Dict, Any, Optional
+
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import text, Column, String, Integer, Text, Index
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
-from pgvector.sqlalchemy import Vector
+from sqlalchemy.orm import Session
 
 # Load environment variables from .env file
 try:
@@ -22,7 +24,13 @@ except ImportError:
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.helpers.ingestion_pipeline.shared.chunker import Chunk
-from app.helpers.ingestion_pipeline.shared.openai_embeddings import OpenAIEmbeddings, VECTOR_DIMENSION
+from app.helpers.ingestion_pipeline.shared.openai_embeddings import (
+    OpenAIEmbeddings,
+    VECTOR_DIMENSION,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 class PropertyEmbedding(Base):
@@ -83,8 +91,8 @@ class PgVectorStore:
         self.embedding_model_name = embedding_model
         self.db_session = db_session
         self._owns_session = False
-        
-        print(f"Initializing OpenAI embeddings with model: {embedding_model}")
+
+        logger.info("Initializing OpenAI embeddings with model: %s", embedding_model)
         try:
             # Try to get API key from parameter, env var, or .env file
             if not openai_api_key:
@@ -99,18 +107,21 @@ class PgVectorStore:
                 except ImportError:
                     pass
             
-            self.embedding_model = OpenAIEmbeddings(api_key=openai_api_key, model=embedding_model)
-            print(f"✓ OpenAI embeddings initialized successfully")
+            self.embedding_model = OpenAIEmbeddings(
+                api_key=openai_api_key,
+                model=embedding_model,
+            )
+            logger.info("✓ OpenAI embeddings initialized successfully")
         except Exception as e:
-            print(f"✗ Failed to initialize OpenAI embeddings: {e}")
-            raise RuntimeError(f"Cannot initialize OpenAI embeddings: {e}")
+            logger.exception("✗ Failed to initialize OpenAI embeddings: %s", e)
+            raise RuntimeError(f"Cannot initialize OpenAI embeddings: {e}") from e
         
         if self.db_session is None:
             try:
                 self.db_session = SessionLocal()
                 self._owns_session = True
             except Exception as e:
-                print(f"⚠️  Initial DB connection warning: {e}")
+                logger.warning("⚠️  Initial DB connection warning: %s", e)
                 time.sleep(1)
                 self.db_session = SessionLocal()
                 self._owns_session = True
@@ -126,16 +137,21 @@ class PgVectorStore:
             try:
                 self.db_session.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
                 self.db_session.commit()
-                print("✓ pgvector extension enabled")
-                
+                logger.info("✓ pgvector extension enabled")
+
                 Base.metadata.create_all(bind=engine, tables=[PropertyEmbedding.__table__])
-                print("✓ property_embeddings table ready")
+                logger.info("✓ property_embeddings table ready")
                 return
                 
             except OperationalError as e:
                 if attempt < max_retries - 1:
                     retry_delay = base_delay * (2 ** attempt)
-                    print(f"⚠️  Connection issue (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
+                    logger.warning(
+                        "⚠️  Connection issue (attempt %s/%s), retrying in %ss...",
+                        attempt + 1,
+                        max_retries,
+                        retry_delay,
+                    )
                     time.sleep(retry_delay)
                     if self._owns_session:
                         try:
@@ -144,13 +160,13 @@ class PgVectorStore:
                             pass
                         self.db_session = SessionLocal()
                 else:
-                    print(f"⚠️  Warning: {e}")
+                    logger.warning("⚠️  Warning: %s", e)
                     try:
                         self.db_session.rollback()
                     except:
                         pass
             except Exception as e:
-                print(f"⚠️  Warning: {e}")
+                logger.warning("⚠️  Warning: %s", e)
                 try:
                     self.db_session.rollback()
                 except:
@@ -195,12 +211,12 @@ class PgVectorStore:
             chunks: List of Chunk objects to embed and store
         """
         if not chunks:
-            print("No chunks to add")
+            logger.info("No chunks to add")
             return
-        
-        print(f"Adding {len(chunks)} chunks to vector store...")
-        
-        print("Generating embeddings using OpenAI...")
+
+        logger.info("Adding %d chunks to vector store...", len(chunks))
+
+        logger.info("Generating embeddings using OpenAI...")
         texts = [chunk.content for chunk in chunks]
         embeddings = self.embedding_model.encode(
             texts,
@@ -210,8 +226,8 @@ class PgVectorStore:
         
         # Convert numpy arrays to lists for storage
         embeddings = [emb.tolist() if hasattr(emb, 'tolist') else emb for emb in embeddings]
-        
-        print("Storing in PostgreSQL...")
+
+        logger.info("Storing in PostgreSQL...")
         added_count = 0
         updated_count = 0
         
@@ -259,14 +275,23 @@ class PgVectorStore:
                         added_count += 1
                 
                 self.db_session.commit()
-                print(f"✓ Added {added_count} new chunks, updated {updated_count} existing chunks")
+                logger.info(
+                    "✓ Added %d new chunks, updated %d existing chunks",
+                    added_count,
+                    updated_count,
+                )
                 break  # Success, exit retry loop
                 
             except (OperationalError, Exception) as e:
                 if attempt < max_retries - 1:
                     retry_delay = 1 * (2 ** attempt)
-                    print(f"⚠️  Database error during commit (attempt {attempt + 1}/{max_retries}): {type(e).__name__}")
-                    print(f"   Retrying in {retry_delay}s...")
+                    logger.warning(
+                        "⚠️  Database error during commit (attempt %s/%s): %s",
+                        attempt + 1,
+                        max_retries,
+                        type(e).__name__,
+                    )
+                    logger.warning("   Retrying in %ss...", retry_delay)
                     try:
                         self.db_session.rollback()
                     except:
@@ -278,7 +303,12 @@ class PgVectorStore:
                     added_count = 0
                     updated_count = 0
                 else:
-                    print(f"❌ Failed to commit after {max_retries} attempts: {type(e).__name__}: {e}")
+                    logger.exception(
+                        "❌ Failed to commit after %s attempts: %s: %s",
+                        max_retries,
+                        type(e).__name__,
+                        e,
+                    )
                     try:
                         self.db_session.rollback()
                     except:
@@ -291,17 +321,19 @@ class PgVectorStore:
         n_results: int = 5,
         listing_id: Optional[str] = None,
         chunk_types: Optional[List[str]] = None,
-        filter_metadata: Optional[Dict[str, Any]] = None
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        query_embedding: Optional[List[float]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for similar chunks using cosine similarity.
         
         Args:
-            query: Search query text
+            query: Search query text (used only when query_embedding is not provided)
             n_results: Number of results to return
             listing_id: Optional filter by listing ID (deprecated, use filter_metadata)
             chunk_types: Optional filter by chunk types (deprecated, use filter_metadata)
             filter_metadata: Optional metadata filters (ChromaDB compatibility)
+            query_embedding: Optional precomputed query embedding to avoid repeated encode() calls
             
         Returns:
             List of matching chunks with metadata and similarity scores
@@ -312,9 +344,13 @@ class PgVectorStore:
             if chunk_type_single and not chunk_types:
                 chunk_types = [chunk_type_single]
         
-        # Generate query embedding
-        query_embeddings = self.embedding_model.encode([query], convert_to_numpy=False)
-        query_embedding = query_embeddings[0] if query_embeddings else []
+        # Use precomputed embedding when provided (saves embedding API calls when doing multiple searches)
+        if query_embedding is not None:
+            query_embedding_list = list(query_embedding)
+        else:
+            query_embeddings = self.embedding_model.encode([query], convert_to_numpy=False)
+            raw = query_embeddings[0] if query_embeddings else []
+            query_embedding_list = raw.tolist() if hasattr(raw, 'tolist') else list(raw)
         
         sql = text("""
             SELECT 
@@ -335,9 +371,6 @@ class PgVectorStore:
             listing_filter="AND listing_id = :listing_id" if listing_id else "",
             chunk_type_filter="AND chunk_type = ANY(:chunk_types)" if chunk_types else ""
         ))
-        
-        # Ensure query_embedding is a list
-        query_embedding_list = query_embedding.tolist() if hasattr(query_embedding, 'tolist') else query_embedding
         
         params = {
             'query_embedding': query_embedding_list,
@@ -378,7 +411,12 @@ class PgVectorStore:
                         pass
                 if attempt < max_retries - 1:
                     retry_delay = 1 * (2 ** attempt)
-                    print(f"⚠️  Database connection issue (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
+                    logger.warning(
+                        "⚠️  Database connection issue (attempt %s/%s), retrying in %ss...",
+                        attempt + 1,
+                        max_retries,
+                        retry_delay,
+                    )
                     time.sleep(retry_delay)
                     try:
                         self.db_session.rollback()
@@ -387,7 +425,10 @@ class PgVectorStore:
                     if self._owns_session:
                         self._refresh_session()
                 else:
-                    print(f"❌ Connection failed after {max_retries} attempts. Please check your database connection.")
+                    logger.exception(
+                        "❌ Connection failed after %s attempts. Please check your database connection.",
+                        max_retries,
+                    )
                     raise
             except Exception as e:
                 # Catch any other errors (like InFailedSqlTransaction)
@@ -397,7 +438,7 @@ class PgVectorStore:
                         result = None
                     except:
                         pass
-                print(f"⚠️  Database error: {type(e).__name__}: {e}")
+                logger.exception("⚠️  Database error: %s: %s", type(e).__name__, e)
                 try:
                     self.db_session.rollback()
                 except:
@@ -405,7 +446,7 @@ class PgVectorStore:
                 if self._owns_session and attempt < max_retries - 1:
                     self._refresh_session()
                     retry_delay = 1 * (2 ** attempt)
-                    print(f"⚠️  Retrying in {retry_delay}s...")
+                    logger.warning("⚠️  Retrying in %ss...", retry_delay)
                     time.sleep(retry_delay)
                 else:
                     raise
@@ -606,7 +647,7 @@ class PgVectorStore:
         """
         self.db_session.query(PropertyEmbedding).delete()
         self.db_session.commit()
-        print("⚠️  All embeddings cleared (including property_document chunks)")
+        logger.warning("⚠️  All embeddings cleared (including property_document chunks)")
     
     def get_stats(self) -> Dict[str, Any]:
         """

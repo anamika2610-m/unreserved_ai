@@ -86,6 +86,13 @@ class Conversation(Base):
         nullable=False,
     )
 
+    # Last message timestamp: used for 10-day retention (is_active until last_message_at + 10 days)
+    last_message_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=True,
+    )
+
     # One conversation → many messages
     messages = relationship(
         "ChatMessage",

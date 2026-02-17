@@ -1,9 +1,11 @@
 """
 Generation module for creating AI responses to buyer enquiries.
 """
+import logging
 import re
-from typing import Dict, Any, Optional, List
+import time
 from datetime import datetime, timedelta
+from typing import Dict, Any, Optional, List, Tuple
 
 from app.services.rag_pipeline.llms import (
     get_model_config,
@@ -14,9 +16,16 @@ from app.services.rag_pipeline.prompts import (
     SYSTEM_PROMPT,
     GENERIC_SYSTEM_PROMPT,
     ENQUIRY_EMAIL_SYSTEM_PROMPT,
+    CONVERSATIONAL_SYSTEM_PROMPT,
+    INTENT_CLASSIFIER_SYSTEM,
     create_user_prompt,
     create_bid_advice_prompt,
     create_enquiry_email_user_prompt,
+)
+from app.services.rag_pipeline.config import (
+    GENERIC_SIMILARITY_THRESHOLD,
+    DEFAULT_MAX_DISTANCE_KM,
+    DEFAULT_MAX_NEARBY_PROPERTIES,
 )
 from app.schemas import AIResponse, EnquiryLog
 from app.services.rag_pipeline.augmentation import QueryAugmenter
@@ -29,11 +38,21 @@ from app.services.rag_pipeline.google_maps_links import (
 )
 from app.services.tone_adaptation_service import ToneAdaptationService, ToneLevel
 
-# Constants
+
+logger = logging.getLogger(__name__)
+
+# Constants (some centralized in config.py)
 CONVERSATIONAL_PHRASES = [
-    'recording', 'testing', 'test', 'checking', 'see how', 'let\'s see', 
+    'recording', 'testing', 'test', 'checking', 'see how', 'let\'s see',
     'just testing', 'trying out', 'how does this work', 'how does it work',
-    'chatbot usage', 'for my chatbot'
+    'chatbot usage', 'for my chatbot',
+]
+# Short acknowledgments / positive reactions – respond conversationally, no retrieval
+ACKNOWLEDGMENT_PHRASES = [
+    'nice', 'good', 'great', 'thanks', 'thank you', 'sounds good', 'cool',
+    'lovely', 'good to know', 'good features', 'that is good', "that's good",
+    'that is good features', 'perfect', 'awesome', 'appreciate it', 'noted',
+    'got it', 'understood', 'that helps', 'helpful', 'cheers', 'sweet',
 ]
 
 NEGOTIATION_KEYWORDS = [
@@ -59,7 +78,6 @@ INVALID_AMENITY_TERMS = [
     'song', 'songs', 'music', 'movie', 'pets', 'animals', 'people', 'friends', 'job', 'work'
 ]
 
-GENERIC_SIMILARITY_THRESHOLD = 0.3
 PROMPT_VERSION = "1.0"
 
 
@@ -110,6 +128,185 @@ class ResponseGenerator:
         
         return "unknown"
 
+    def _do_conversational_reply(
+        self,
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]],
+        listing_id: Optional[str],
+        user_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Build and return the standard response dict for conversational/acknowledgment replies."""
+        try:
+            answer = self._generate_conversational_reply(query, conversation_history)
+        except Exception as e:
+            logger.warning("⚠️ Conversational LLM fallback error: %s", e)
+            answer = (
+                "Glad that helped! Is there anything else you'd like to know about this property?"
+            )
+        if not answer:
+            answer = (
+                "Glad that helped! Is there anything else you'd like to know about this property?"
+            )
+        ai_response = sanitize_response(
+            AIResponse(
+                answer=answer,
+                needs_vendor_contact=False,
+                escalation_reason="Conversational reply (LLM)",
+                data_sources=[],
+            )
+        )
+        log_entry = EnquiryLog(
+            question=query,
+            answer=answer,
+            listing_id=listing_id,
+            user_id=user_id,
+            data_sources=[],
+            needs_vendor_contact=False,
+            escalation_reason="Conversational reply (LLM)",
+            model_version=self.model_name,
+            prompt_version=PROMPT_VERSION,
+            timestamp=datetime.now(),
+        )
+        return {
+            "ai_response": ai_response,
+            "log_entry": log_entry,
+            "nearby_properties": [],
+            "amenity_links": [],
+        }
+
+    def _handle_greeting(
+        self,
+        query: str,
+        listing_id: Optional[str],
+        user_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Return the standard greeting response dict."""
+        answer = (
+            "Hello! 👋 I'm here to help you learn more about this property. "
+            "You can ask me about:\n\n"
+            "• **Pricing** and sale methods\n"
+            "• **Property features** (bedrooms, bathrooms, land area, etc.)\n"
+            "• **Location** and nearby amenities\n"
+            "• **Nearby properties** for sale\n"
+            "What would you like to know?"
+        )
+        return self._create_response_dict(
+            answer=answer,
+            needs_vendor_contact=False,
+            escalation_reason=None,
+            data_sources=[],
+            query=query,
+            listing_id=listing_id,
+            user_id=user_id,
+        )
+
+    def _handle_negotiation(
+        self,
+        query: str,
+        listing_id: Optional[str],
+        user_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Return the standard negotiation escalation response dict."""
+        answer = (
+            "I cannot provide advice on pricing or negotiation strategies. "
+            "For discussions about price negotiation or making an offer, "
+            "please contact the listing agent or vendor directly. They will be "
+            "happy to discuss your interest in the property."
+        )
+        ai_response = sanitize_response(
+            AIResponse(
+                answer=answer,
+                needs_vendor_contact=True,
+                escalation_reason="Negotiation/pricing advice query",
+                data_sources=[],
+            )
+        )
+        log_entry = EnquiryLog(
+            question=query,
+            answer=answer,
+            listing_id=listing_id,
+            user_id=user_id,
+            data_sources=[],
+            needs_vendor_contact=True,
+            escalation_reason="Negotiation/pricing advice query",
+            model_version=self.model_name,
+            prompt_version=PROMPT_VERSION,
+            timestamp=datetime.now(),
+        )
+        return {
+            "ai_response": ai_response,
+            "log_entry": log_entry,
+            "nearby_properties": [],
+            "amenity_links": [],
+        }
+
+    def _try_generic_knowledge_first(
+        self,
+        query: str,
+        n_retrieval_results: int,
+        is_enquiry_message: bool,
+        listing_id: Optional[str],
+        user_id: Optional[str],
+        timings_breakdown: Dict[str, float],
+    ) -> Tuple[Optional[Dict[str, Any]], str, List[Any], Any, str]:
+        """
+        Try generic knowledge store first. Returns (early_return_dict_or_None, context, data_sources, location_context, query_source).
+        If early_return_dict is not None, caller should return it. Otherwise caller uses the context/data_sources/query_source.
+        """
+        logger.info(
+            "🔍 Step 1: Generic query detected → trying generic knowledge store first",
+        )
+        _t = time.perf_counter()
+        generic_context, generic_data_sources, _ = self.augmenter.augment_query(
+            query=query,
+            listing_id=None,
+            n_results=n_retrieval_results,
+            query_source='generic'
+        )
+        timings_breakdown["augment_generic_ms"] = (time.perf_counter() - _t) * 1000.0
+
+        if generic_data_sources and generic_context and generic_context.strip():
+            logger.info("✅ Generic knowledge found → using generic data")
+            logger.debug("   Context length: %d chars", len(generic_context))
+            logger.debug("   Data sources: %d", len(generic_data_sources))
+            top_sim = (
+                generic_data_sources[0].similarity_score
+                if generic_data_sources[0].similarity_score is not None
+                else 0.0
+            )
+            logger.debug("   First source similarity: %.4f", top_sim)
+            return (None, generic_context, generic_data_sources, None, 'generic')
+
+        # Generic query but no results - provide fallback
+        logger.info("⚠️  Generic query returned no results → providing fallback message")
+        logger.debug(
+            "   Debug: generic_data_sources=%d, context_length=%d",
+            len(generic_data_sources) if generic_data_sources else 0,
+            len(generic_context) if generic_context else 0,
+        )
+        if is_enquiry_message:
+            answer = (
+                "This is an automated email. We don't have enough information to answer this enquiry "
+                "right now, but we will get back to you shortly."
+            )
+        else:
+            answer = (
+                "I don't have detailed information on that topic. "
+                "For specific questions about real estate law, licensing, or processes in Victoria, "
+                "I recommend consulting with a qualified professional such as a lawyer, "
+                "licensed real estate agent, or Consumer Affairs Victoria (CAV)."
+            )
+        response_dict = self._create_response_dict(
+            answer=answer,
+            needs_vendor_contact=False,
+            escalation_reason="No relevant information found in generic knowledge base",
+            data_sources=[],
+            query=query,
+            listing_id=listing_id,
+            user_id=user_id,
+        )
+        return (response_dict, "", [], None, 'property')
+
     # ------------------------------------------------------------------
     # MAIN GENERATION METHOD
     # ------------------------------------------------------------------
@@ -127,7 +324,7 @@ class ResponseGenerator:
         from app.services.rag_pipeline.preprocess import extract_suggested_topic_from_history
         rewritten_query = extract_suggested_topic_from_history(query, conversation_history)
         if rewritten_query:
-            print(f"🔄 Query rewritten: '{query}' → '{rewritten_query}'")
+            logger.info("🔄 Query rewritten: '%s' → '%s'", query, rewritten_query)
             query = rewritten_query  # Use rewritten query for retrieval
         
         # Initialize variables
@@ -135,173 +332,84 @@ class ResponseGenerator:
         data_sources = []
         location_context = None
         query_source = 'property'
-        
-        # 0️⃣ Check for conversational/test queries FIRST (before any retrieval)
+        t_start = time.perf_counter()
+        t_llm_start = None  # set right before main LLM call for eval latency breakdown
+        timings_breakdown: Dict[str, float] = {}
+
+        # 0️⃣ Check for conversational / acknowledgment queries FIRST (before any retrieval)
         query_lower = query.lower()
+        query_stripped = query_lower.strip().rstrip('?!.,').strip()
         is_conversational = any(phrase in query_lower for phrase in CONVERSATIONAL_PHRASES)
-        
-        if is_conversational:
-            # Conversational query - return friendly message immediately, no retrieval or LLM call needed
-            print("✅ Conversational query detected → returning friendly welcome message (skipping retrieval)")
-            answer = (
-                "I'm here and ready to help! I can answer questions about property listings, "
-                "real estate processes, legal requirements, and general real estate knowledge in Victoria. "
-                "What would you like to know?"
-            )
-            
-            ai_response = sanitize_response(
-                AIResponse(
-                    answer=answer,
-                    needs_vendor_contact=False,
-                    escalation_reason="Conversational/test query",
-                    data_sources=[],
-                )
-            )
-            
-            log_entry = EnquiryLog(
-                question=query,
-                answer=answer,
-            listing_id=listing_id,
-                user_id=user_id,
-                data_sources=[],
-                needs_vendor_contact=False,
-                escalation_reason="Conversational/test query",
-                model_version=self.model_name,
-                prompt_version=PROMPT_VERSION,
-                timestamp=datetime.now(),
-            )
-            
-            return {
-                "ai_response": ai_response,
-                "log_entry": log_entry,
-                "nearby_properties": [],
-                "amenity_links": [],
-            }
-        
+        is_acknowledgment = (
+            len(query_stripped) <= 50
+            and any(phrase in query_lower for phrase in ACKNOWLEDGMENT_PHRASES)
+        )
+
+        if is_conversational or is_acknowledgment:
+            logger.info("✅ Conversational/acknowledgment detected → LLM replying naturally (skipping retrieval)")
+            return self._do_conversational_reply(query, conversation_history, listing_id, user_id)
+
+        # For short or ambiguous messages, let the LLM decide if this needs listing data or is conversational
+        word_count = len(query_stripped.split())
+        char_count = len(query_stripped)
+        is_short_or_ambiguous = word_count <= 12 or char_count <= 80
+        if is_short_or_ambiguous:
+            intent = self._classify_intent_listing_vs_conversational(query, conversation_history)
+            if intent == "conversational":
+                logger.info("✅ Intent classifier → conversational (skipping retrieval)")
+                return self._do_conversational_reply(query, conversation_history, listing_id, user_id)
+
         # 0.5️⃣ Check for greetings FIRST (before any routing)
+        _t = time.perf_counter()
         enquiry_type = detect_enquiry_type(query)
+        timings_breakdown["detect_enquiry_type_ms"] = (time.perf_counter() - _t) * 1000.0
         if enquiry_type == "greeting":
-            print("👋 Greeting detected → returning friendly welcome message")
-            answer = (
-                "Hello! 👋 I'm here to help you learn more about this property. "
-                "You can ask me about:\n\n"
-                "• **Pricing** and sale methods\n"
-                "• **Property features** (bedrooms, bathrooms, land area, etc.)\n"
-                "• **Location** and nearby amenities\n"
-                "• **Nearby properties** for sale\n"
-                "• **Property documents** (aerial views, bushfire/flood information, etc.)\n\n"
-                "What would you like to know?"
-            )
-            return self._create_response_dict(
-                answer=answer,
-                needs_vendor_contact=False,
-                escalation_reason=None,
-                data_sources=[],
-                query=query,
-                listing_id=listing_id,
-                user_id=user_id,
-            )
-        
+            logger.info("👋 Greeting detected → returning friendly welcome message")
+            return self._handle_greeting(query, listing_id, user_id)
+
         # 1️⃣ Check for negotiation/pricing advice queries FIRST (must escalate to vendor)
         query_lower = query.lower()
         is_negotiation_query = any(keyword in query_lower for keyword in NEGOTIATION_KEYWORDS)
-        
+
         if is_negotiation_query:
-            print("🚨 Negotiation query detected → escalating to vendor/agent")
-            answer = (
-                "I cannot provide advice on pricing or negotiation strategies. "
-                "For discussions about price negotiation or making an offer, "
-                "please contact the listing agent or vendor directly. They will be "
-                "happy to discuss your interest in the property."
-            )
-            
-            ai_response = sanitize_response(
-                AIResponse(
-                    answer=answer,
-                    needs_vendor_contact=True,
-                    escalation_reason="Negotiation/pricing advice query",
-                    data_sources=[],
-                )
-            )
-            
-            log_entry = EnquiryLog(
-                question=query,
-                answer=answer,
-                listing_id=listing_id,
-                user_id=user_id,
-                data_sources=[],
-                needs_vendor_contact=True,
-                escalation_reason="Negotiation/pricing advice query",
-                model_version=self.model_name,
-                prompt_version=PROMPT_VERSION,
-                timestamp=datetime.now(),
-            )
-            
-            return {
-                "ai_response": ai_response,
-                "log_entry": log_entry,
-                "nearby_properties": [],
-                "amenity_links": [],
-            }
-        
+            logger.info("🚨 Negotiation query detected → escalating to vendor/agent")
+            return self._handle_negotiation(query, listing_id, user_id)
+
         # 2️⃣ Detect query source (property vs generic)
-        # Check if it's a clear generic legal/process question
-        query_source_detected = detect_query_source(query, conversation_history=conversation_history)
-        
+        _t = time.perf_counter()
+        query_source_detected = detect_query_source(
+            query,
+            conversation_history=conversation_history,
+            listing_id=listing_id,
+        )
+        timings_breakdown["detect_query_source_ms"] = (time.perf_counter() - _t) * 1000.0
+
         # Strong generic indicators (legal/process questions that should skip property data entirely)
         is_strong_generic = any(kw in query.lower() for kw in STRONG_GENERIC_KEYWORDS)
-        
-        print(f"🔍 Query detection: query_source_detected={query_source_detected}, is_strong_generic={is_strong_generic}, listing_id={listing_id}")
-        
+
+        logger.debug(
+            "🔍 Query detection: query_source_detected=%s, is_strong_generic=%s, listing_id=%s",
+            query_source_detected,
+            is_strong_generic,
+            listing_id,
+        )
+
         # 3️⃣ CASCADING FALLBACK LOGIC
         # Priority 1: If query is detected as generic (legal/process), go to generic knowledge first
-        # This includes both strong generic keywords AND queries routed to generic by detect_query_source
         if is_strong_generic or query_source_detected == 'generic':
-            print(f"🔍 Step 1: Generic query detected (is_strong_generic={is_strong_generic}, query_source={query_source_detected}) → trying generic knowledge store first")
-            generic_context, generic_data_sources, _ = self.augmenter.augment_query(
-                query=query,
-                listing_id=None,
-                n_results=n_retrieval_results,
-                query_source='generic'
-            )
-            
-            if generic_data_sources and generic_context and generic_context.strip():
-                print(f"✅ Generic knowledge found → using generic data")
-                print(f"   Context length: {len(generic_context)} chars")
-                print(f"   Data sources: {len(generic_data_sources)}")
-                top_sim = generic_data_sources[0].similarity_score if generic_data_sources[0].similarity_score is not None else 0.0
-                print(f"   First source similarity: {top_sim:.4f}")
-                context = generic_context
-                data_sources = generic_data_sources
-                location_context = None
-                query_source = 'generic'
-            else:
-                # Generic query but no results - provide fallback
-                print("⚠️  Generic query returned no results → providing fallback message")
-                print(f"   Debug: generic_data_sources={len(generic_data_sources) if generic_data_sources else 0}, context_length={len(generic_context) if generic_context else 0}")
-                
-                if is_enquiry_message:
-                    answer = (
-                        "This is an automated email. We don't have enough information to answer this enquiry "
-                        "right now, but we will get back to you shortly."
-                    )
-                else:
-                    answer = (
-                        "I don't have detailed information on that topic. "
-                        "For specific questions about real estate law, licensing, or processes in Victoria, "
-                        "I recommend consulting with a qualified professional such as a lawyer, "
-                        "licensed real estate agent, or Consumer Affairs Victoria (CAV)."
-                    )
-                
-                return self._create_response_dict(
-                    answer=answer,
-                    needs_vendor_contact=False,
-                    escalation_reason="No relevant information found in generic knowledge base",
-                    data_sources=[],
+            early_return, context, data_sources, location_context, query_source = (
+                self._try_generic_knowledge_first(
                     query=query,
+                    n_retrieval_results=n_retrieval_results,
+                    is_enquiry_message=is_enquiry_message,
                     listing_id=listing_id,
                     user_id=user_id,
+                    timings_breakdown=timings_breakdown,
                 )
+            )
+            if early_return is not None:
+                return early_return
+            # else context, data_sources, location_context, query_source are set
         else:
             # 🔄 CASCADING FALLBACK: Property JSON → Property PDFs → Generic PDFs → Escalation
             property_json_context = ""
@@ -318,6 +426,7 @@ class ResponseGenerator:
             if listing_id:
                 # 🚨 PRICE VISIBILITY CHECK: Fetch displayPrice from database
                 display_price = True  # Default to True if we can't fetch
+                _t_db = time.perf_counter()
                 try:
                     from app.db.postgres.repositories.listing_repository import ListingRepository
                     from app.db.session import SessionLocal
@@ -331,20 +440,34 @@ class ResponseGenerator:
                         )
                         if listing_data:
                             display_price = listing_data.get('display_price', True)
-                            print(f"🔒 Price visibility check: displayPrice = {display_price} for listing {listing_id}")
+                            logger.debug(
+                                "🔒 Price visibility check: displayPrice=%s for listing %s",
+                                display_price,
+                                listing_id,
+                            )
                     finally:
                         db_session.close()
                 except Exception as e:
-                    print(f"⚠️  Failed to fetch displayPrice from database: {type(e).__name__}: {e}")
+                    logger.warning(
+                        "⚠️  Failed to fetch displayPrice from database for %s: %s: %s",
+                        listing_id,
+                        type(e).__name__,
+                        e,
+                    )
+                timings_breakdown["display_price_db_ms"] = (time.perf_counter() - _t_db) * 1000.0
                     # Default to True (show price) if we can't fetch - safer default
                 
-                print(f"🔍 Step 1/4: Trying property JSON chunks (listing_id: {listing_id})")
-                print(f"           → This includes: overview, pricing, specifications, location chunks (excludes property_document)")
+                logger.info("🔍 Step 1/4: Trying property JSON chunks (listing_id: %s)", listing_id)
+                logger.debug(
+                    "           → This includes: overview, pricing, specifications, location chunks (excludes property_document)",
+                )
+                _t = time.perf_counter()
                 property_json_context, property_json_data_sources, property_location_context = self.augmenter.augment_query_json_chunks(
                     query=query,
                     listing_id=listing_id,
                     n_results=n_retrieval_results
                 )
+                timings_breakdown["augment_json_ms"] = (time.perf_counter() - _t) * 1000.0
                 
                 # 🚨 RETRIEVAL LAYER ENFORCEMENT: Filter out price chunks if displayPrice = false
                 if not display_price and enquiry_type == "price":
@@ -356,7 +479,10 @@ class ResponseGenerator:
                     ]
                     filtered_count = original_count - len(property_json_data_sources)
                     if filtered_count > 0:
-                        print(f"🔒 RETRIEVAL LAYER: Filtered out {filtered_count} pricing chunk(s) (displayPrice = false)")
+                        logger.info(
+                            "🔒 RETRIEVAL LAYER: Filtered out %d pricing chunk(s) (displayPrice = false)",
+                            filtered_count,
+                        )
                         # Also remove pricing content from context
                         import re
                         # Remove pricing sections from context
@@ -381,18 +507,27 @@ class ResponseGenerator:
                     )
                     
                     if property_json_data_sources:
-                        print(f"           → Found {len(property_json_data_sources)} JSON chunks")
-                        top_similarity = property_json_data_sources[0].similarity_score if property_json_data_sources[0].similarity_score is not None else 0.0
-                        print(f"           → Top similarity: {top_similarity:.4f}")
-                        print(f"           → Sufficient: {property_sufficient}")
+                        logger.debug(
+                            "           → Found %d JSON chunks",
+                            len(property_json_data_sources),
+                        )
+                        top_similarity = (
+                            property_json_data_sources[0].similarity_score
+                            if property_json_data_sources[0].similarity_score is not None
+                            else 0.0
+                        )
+                        logger.debug("           → Top similarity: %.4f", top_similarity)
+                        logger.debug("           → Sufficient: %s", property_sufficient)
                     elif property_location_context and property_location_context.get('nearby_properties_json'):
                         # No JSON chunks but we have location context with nearby properties
-                        print(f"           → No property JSON chunks found, but location_context has nearby properties")
-                        print(f"           → Sufficient: {property_sufficient}")
+                        logger.debug(
+                            "           → No property JSON chunks found, but location_context has nearby properties",
+                        )
+                        logger.debug("           → Sufficient: %s", property_sufficient)
                     else:
-                        print(f"           → No property JSON chunks found")
+                        logger.debug("           → No property JSON chunks found")
                 else:
-                    print(f"           → No property JSON chunks found")
+                    logger.debug("           → No property JSON chunks found")
                     insufficiency_reason = "No property JSON chunks found"
                 
                 # 🚨 CRITICAL: Check if this is a "document query" (aerial view, bushfire, flood, etc.)
@@ -412,15 +547,16 @@ class ResponseGenerator:
                 if property_json_data_sources:
                     # If it's a document query AND JSON is insufficient → Skip JSON, use ONLY property PDFs
                     if is_document_query and not property_sufficient:
-                        print(f"⚠️  Step 1/4: JSON chunks found but INSUFFICIENT for document query")
-                        print(f"           → Reason: {insufficiency_reason}")
-                        print(f"🔍 Step 2/4: Skipping JSON → Trying ONLY property-specific PDFs (document query)")
-                        
+                        logger.info("⚠️  Step 1/4: JSON chunks found but INSUFFICIENT for document query")
+                        logger.debug("           → Reason: %s", insufficiency_reason)
+                        logger.info("🔍 Step 2/4: Skipping JSON → Trying ONLY property-specific PDFs (document query)")
+                        _t = time.perf_counter()
                         property_pdf_context, property_pdf_data_sources, property_location_context = self.augmenter.augment_query_pdf_chunks(
                             query=query,
                             listing_id=listing_id,
                             n_results=n_retrieval_results
                         )
+                        timings_breakdown["augment_pdf_ms"] = timings_breakdown.get("augment_pdf_ms", 0) + (time.perf_counter() - _t) * 1000.0
                         
                         # Check if property PDF data is sufficient
                         if property_pdf_data_sources:
@@ -430,33 +566,40 @@ class ResponseGenerator:
                                 data_sources=property_pdf_data_sources,
                                 location_context=property_location_context
                             )
-                            print(f"           → Found {len(property_pdf_data_sources)} PDF chunks")
-                            top_similarity = property_pdf_data_sources[0].similarity_score if property_pdf_data_sources[0].similarity_score is not None else 0.0
-                            print(f"           → Top similarity: {top_similarity:.4f}")
-                            print(f"           → Sufficient: {property_sufficient}")
-                            
+                            logger.debug(
+                                "           → Found %d PDF chunks",
+                                len(property_pdf_data_sources),
+                            )
+                            top_similarity = (
+                                property_pdf_data_sources[0].similarity_score
+                                if property_pdf_data_sources[0].similarity_score is not None
+                                else 0.0
+                            )
+                            logger.debug("           → Top similarity: %.4f", top_similarity)
+                            logger.debug("           → Sufficient: %s", property_sufficient)
+
                             if property_sufficient:
-                                print(f"✅ Step 2/4: Using ONLY property PDFs (JSON skipped for document query)")
+                                logger.info("✅ Step 2/4: Using ONLY property PDFs (JSON skipped for document query)")
                                 context = property_pdf_context  # Use ONLY PDFs, not JSON
                                 data_sources = property_pdf_data_sources
                                 location_context = property_location_context
                                 query_source = 'property'
                             else:
-                                print(f"⚠️  Step 2/4: Property PDF chunks insufficient")
-                                print(f"           → Reason: {insufficiency_reason}")
+                                logger.info("⚠️  Step 2/4: Property PDF chunks insufficient")
+                                logger.debug("           → Reason: %s", insufficiency_reason)
                                 # Will fall through to generic or escalation
                                 context = ""
                                 data_sources = []
                                 location_context = None
                         else:
-                            print(f"           → No property PDF chunks found")
+                            logger.debug("           → No property PDF chunks found")
                             # Will fall through to generic or escalation
                             context = ""
                             data_sources = []
                             location_context = None
                     else:
                         # Normal case: Use JSON as primary source
-                        print(f"✅ Step 1/4: Property JSON chunks found → using JSON data as PRIMARY source")
+                        logger.info("✅ Step 1/4: Property JSON chunks found → using JSON data as PRIMARY source")
                         context = property_json_context
                         data_sources = property_json_data_sources
                         location_context = property_location_context
@@ -482,49 +625,59 @@ class ResponseGenerator:
                             json_has_answer = any(kw in json_context_lower for kw in matching_keywords)
                         
                         if not property_sufficient and not (query_has_backend_attribute and json_has_answer):
-                            print(f"⚠️  Step 1/4: JSON data found but may be insufficient for full answer")
-                            print(f"           → Reason: {insufficiency_reason}")
-                            print(f"🔍 Step 2/4: Trying property-specific PDFs to SUPPLEMENT JSON data")
-                            
+                            logger.info("⚠️  Step 1/4: JSON data found but may be insufficient for full answer")
+                            logger.debug("           → Reason: %s", insufficiency_reason)
+                            logger.info("🔍 Step 2/4: Trying property-specific PDFs to SUPPLEMENT JSON data")
+                            _t = time.perf_counter()
                             property_pdf_context, property_pdf_data_sources, _ = self.augmenter.augment_query_pdf_chunks(
                                 query=query,
                                 listing_id=listing_id,
                                 n_results=n_retrieval_results
                             )
+                            timings_breakdown["augment_pdf_ms"] = timings_breakdown.get("augment_pdf_ms", 0) + (time.perf_counter() - _t) * 1000.0
                             
                             if property_pdf_data_sources:
-                                print(f"           → Found {len(property_pdf_data_sources)} PDF chunks to supplement")
+                                logger.debug(
+                                    "           → Found %d PDF chunks to supplement",
+                                    len(property_pdf_data_sources),
+                                )
                                 # SUPPLEMENT JSON context with PDF context (not replace)
                                 context = property_json_context + "\n\n" + property_pdf_context
                                 # Add PDF sources AFTER JSON sources (JSON has priority)
                                 data_sources = property_json_data_sources + property_pdf_data_sources
-                                print(f"✅ Step 2/4: Combined JSON + PDF data (JSON takes priority)")
+                                logger.info("✅ Step 2/4: Combined JSON + PDF data (JSON takes priority)")
                                 property_sufficient = True  # Combined data should be sufficient
                             else:
-                                print(f"           → No property PDF chunks found to supplement")
+                                logger.debug("           → No property PDF chunks found to supplement")
                         elif query_has_backend_attribute and json_has_answer:
-                            print(f"✅ Step 1/4: JSON data contains answer for backend attribute query - NOT supplementing with PDFs")
+                            logger.info(
+                                "✅ Step 1/4: JSON data contains answer for backend attribute query - NOT supplementing with PDFs",
+                            )
                             # Use JSON data only - don't supplement with PDFs
                 else:
                     # Check if we already have sufficient data from location_context (e.g., nearby properties)
                     if property_sufficient and property_location_context and property_location_context.get('nearby_properties_json'):
-                        print(f"✅ Step 1/4: No JSON chunks BUT location_context has nearby properties → Data SUFFICIENT")
+                        logger.info(
+                            "✅ Step 1/4: No JSON chunks BUT location_context has nearby properties → Data SUFFICIENT",
+                        )
                         # Use location context data even without traditional chunks
                         context = ""  # No text context needed for nearby properties
                         data_sources = []  # No traditional data sources, but we have location_context
                         location_context = property_location_context
                         query_source = 'property'
                     else:
-                        print(f"⚠️  Step 1/4: No Property JSON chunks found")
-                        print(f"           → Reason: {insufficiency_reason}")
-                        
+                        logger.info("⚠️  Step 1/4: No Property JSON chunks found")
+                        logger.debug("           → Reason: %s", insufficiency_reason)
+
                         # Step 2/4: Try property-specific PDFs (only if NO JSON data exists)
-                        print(f"🔍 Step 2/4: No JSON data → Trying property-specific PDFs (property_document chunks)")
+                        logger.info("🔍 Step 2/4: No JSON data → Trying property-specific PDFs (property_document chunks)")
+                        _t = time.perf_counter()
                         property_pdf_context, property_pdf_data_sources, property_location_context = self.augmenter.augment_query_pdf_chunks(
                             query=query,
                             listing_id=listing_id,
                             n_results=n_retrieval_results
                         )
+                        timings_breakdown["augment_pdf_ms"] = timings_breakdown.get("augment_pdf_ms", 0) + (time.perf_counter() - _t) * 1000.0
                         
                         # Check if property PDF data is sufficient
                         if property_pdf_data_sources:
@@ -534,34 +687,41 @@ class ResponseGenerator:
                                 data_sources=property_pdf_data_sources,
                                 location_context=property_location_context
                             )
-                            print(f"           → Found {len(property_pdf_data_sources)} PDF chunks")
-                            top_similarity = property_pdf_data_sources[0].similarity_score if property_pdf_data_sources[0].similarity_score is not None else 0.0
-                            print(f"           → Top similarity: {top_similarity:.4f}")
-                            print(f"           → Sufficient: {property_sufficient}")
+                            logger.debug(
+                                "           → Found %d PDF chunks",
+                                len(property_pdf_data_sources),
+                            )
+                            top_similarity = (
+                                property_pdf_data_sources[0].similarity_score
+                                if property_pdf_data_sources[0].similarity_score is not None
+                                else 0.0
+                            )
+                            logger.debug("           → Top similarity: %.4f", top_similarity)
+                            logger.debug("           → Sufficient: %s", property_sufficient)
                         else:
-                            print(f"           → No property PDF chunks found")
+                            logger.debug("           → No property PDF chunks found")
                             insufficiency_reason = "No property PDF chunks found"
                         
                         if property_sufficient and property_pdf_data_sources:
-                            print(f"✅ Step 2/4: Property PDF chunks sufficient → using PDF data")
+                            logger.info("✅ Step 2/4: Property PDF chunks sufficient → using PDF data")
                             context = property_pdf_context
                             data_sources = property_pdf_data_sources
                             location_context = property_location_context
                             query_source = 'property'
                         else:
-                            print(f"⚠️  Step 2/4: Property PDF chunks insufficient")
-                            print(f"           → Reason: {insufficiency_reason}")
+                            logger.info("⚠️  Step 2/4: Property PDF chunks insufficient")
+                            logger.debug("           → Reason: %s", insufficiency_reason)
             else:
-                print(f"🔍 No listing_id provided → skipping property data (Steps 1-2/4)")
+                logger.info("🔍 No listing_id provided → skipping property data (Steps 1-2/4)")
             
             # Step 3/4: Try generic knowledge as fallback (if property data insufficient)
             generic_context = ""
             generic_data_sources = []
-            
+
             # Skip generic knowledge if we already have sufficient data (including location_context with nearby properties)
             has_location_data = property_location_context and property_location_context.get('nearby_properties_json')
             if not property_sufficient or (not property_json_data_sources and not property_pdf_data_sources and not has_location_data):
-                print(f"🔍 Step 3/4: Trying generic knowledge (generic PDFs from generic_knowledge)")
+                logger.info("🔍 Step 3/4: Trying generic knowledge (generic PDFs from generic_knowledge)")
                 generic_context, generic_data_sources, _ = self.augmenter.augment_query(
                     query=query,
                     listing_id=None,
@@ -571,35 +731,50 @@ class ResponseGenerator:
                 
                 if generic_data_sources and generic_context and generic_context.strip():
                     # Check if generic data has good similarity
-                    top_similarity = generic_data_sources[0].similarity_score if generic_data_sources and generic_data_sources[0].similarity_score is not None else 0.0
-                    print(f"           → Found {len(generic_data_sources)} generic chunks")
-                    print(f"           → Top similarity: {top_similarity:.4f}")
-                    
+                    top_similarity = (
+                        generic_data_sources[0].similarity_score
+                        if generic_data_sources
+                        and generic_data_sources[0].similarity_score is not None
+                        else 0.0
+                    )
+                    logger.debug(
+                        "           → Found %d generic chunks",
+                        len(generic_data_sources),
+                    )
+                    logger.debug("           → Top similarity: %.4f", top_similarity)
+
                     if top_similarity > GENERIC_SIMILARITY_THRESHOLD:
-                        print(f"✅ Step 3/4: Generic knowledge found and relevant → using generic data")
+                        logger.info(
+                            "✅ Step 3/4: Generic knowledge found and relevant → using generic data",
+                        )
                         context = generic_context
                         data_sources = generic_data_sources
                         location_context = None
                         query_source = 'generic'
                     else:
-                        print(f"⚠️  Step 3/4: Generic knowledge found but low relevance (similarity: {top_similarity:.4f})")
+                        logger.info(
+                            "⚠️  Step 3/4: Generic knowledge found but low relevance (similarity: %.4f)",
+                            top_similarity,
+                        )
                         # Continue to Step 4
                         property_sufficient = False
                 else:
-                    print(f"⚠️  Step 3/4: No generic knowledge found")
+                    logger.info("⚠️  Step 3/4: No generic knowledge found")
             
             # Step 4/4: If all previous steps failed, escalate to vendor
             # Don't escalate if we have location_context with nearby properties
             has_location_data = property_location_context and property_location_context.get('nearby_properties_json')
             if not property_sufficient or (not property_json_data_sources and not property_pdf_data_sources and not has_location_data):
                 if not (generic_data_sources and generic_context and generic_context.strip()):
-                    print("⚠️  Step 4/4: All data sources insufficient → escalating to vendor")
-                    fallback_reason = insufficiency_reason if insufficiency_reason else "Insufficient information in property JSON, property PDFs, and no relevant generic knowledge found"
+                    logger.info("⚠️  Step 4/4: All data sources insufficient → escalating to vendor")
+                    fallback_reason = insufficiency_reason if insufficiency_reason else (
+                        "Insufficient information in property JSON, property PDFs, and no relevant generic knowledge found"
+                    )
                     answer = self._generate_vendor_contact_message(query, fallback_reason, is_enquiry_message)
-                    
+
                     # Combine all attempted data sources for logging
                     all_data_sources = property_json_data_sources + property_pdf_data_sources
-                    
+
                     return self._create_response_dict(
                         answer=answer,
                         needs_vendor_contact=True,
@@ -633,7 +808,7 @@ class ResponseGenerator:
         has_location_data = location_context and location_context.get('nearby_properties_json')
         if (not context or not data_sources) and not has_location_data:
             # Final fallback - no data from either source
-            print("⚠️  No data found in property or generic stores → providing fallback message")
+            logger.info("⚠️  No data found in property or generic stores → providing fallback message")
             if is_enquiry_message:
                 answer = (
                     "This is an automated email. We don't have enough information to answer this enquiry "
@@ -698,7 +873,7 @@ class ResponseGenerator:
 
         # 4️⃣ Check if this is an invalid/irrelevant amenity query (check BEFORE valid amenity check)
         if is_invalid_amenity_query(query):
-            print(f"⚠️  Invalid/irrelevant amenity query detected: '{query}'")
+            logger.info("⚠️  Invalid/irrelevant amenity query detected: '%s'", query)
 
             # For enquiry messages, treat low-confidence amenity queries as "no data" and use
             # the automated email fallback instead of asking clarifying questions.
@@ -766,32 +941,39 @@ class ResponseGenerator:
                     listing_activity_data = activity_repo.get_activity_dict(listing_id)
                     
                     if listing_activity_data:
-                        print(f"🎭 Fetching tone adaptation for listing {listing_id}")
-                        print(
-                            f"   Activity metrics: enquiries={listing_activity_data.get('enquiries_7d', 0)}, "
-                            f"offers={listing_activity_data.get('genuine_offers_7d', 0)}, "
-                            f"contracts={listing_activity_data.get('contract_requests_7d', 0)}"
+                        logger.info("🎭 Fetching tone adaptation for listing %s", listing_id)
+                        logger.debug(
+                            "   Activity metrics: enquiries=%s, offers=%s, contracts=%s",
+                            listing_activity_data.get('enquiries_7d', 0),
+                            listing_activity_data.get('genuine_offers_7d', 0),
+                            listing_activity_data.get('contract_requests_7d', 0),
                         )
                         
                         tone_level, tone_context = self.tone_service.determine_tone(listing_activity_data)
                         
                         if tone_level != ToneLevel.NEUTRAL:
-                            print(f"🎭 Tone adaptation: {tone_level.value.upper()}")
-                            print(f"   Context: {tone_context[:150]}...")
+                            logger.info("🎭 Tone adaptation: %s", tone_level.value.upper())
+                            logger.debug("   Context: %s", tone_context[:150] + "...")
                         else:
-                            print("🎭 Tone adaptation: NEUTRAL (no special conditions met)")
+                            logger.info("🎭 Tone adaptation: NEUTRAL (no special conditions met)")
                     else:
-                        print(f"🎭 No activity data found for listing {listing_id} → using NEUTRAL tone")
+                        logger.info(
+                            "🎭 No activity data found for listing %s → using NEUTRAL tone",
+                            listing_id,
+                        )
                 finally:
                     db_session.close()
             except Exception as e:
-                print(f"⚠️  Failed to get listing activity metrics: {type(e).__name__}: {e}")
-                import traceback
-                print(traceback.format_exc())
+                logger.exception(
+                    "⚠️  Failed to get listing activity metrics: %s: %s",
+                    type(e).__name__,
+                    e,
+                )
         else:
-            print(
-                f"🎭 Skipping activity metrics/tone adaptation "
-                f"(query_source={query_source}, listing_id={listing_id})"
+            logger.debug(
+                "🎭 Skipping activity metrics/tone adaptation (query_source=%s, listing_id=%s)",
+                query_source,
+                listing_id,
             )
         
         # 5.5️⃣ Check if this is an amenity query (to pass has_amenity_links flag)
@@ -810,7 +992,10 @@ class ResponseGenerator:
             
             # Fallback: If location_context is None but we have listing_id, fetch location from database
             if (latitude is None or longitude is None) and listing_id:
-                print(f"🗺️  Location not in context, fetching from database for listing_id: {listing_id}")
+                logger.info(
+                    "🗺️  Location not in context, fetching from database for listing_id: %s",
+                    listing_id,
+                )
                 try:
                     from app.db.postgres.repositories.listing_repository import ListingRepository
                     from app.db.session import SessionLocal
@@ -823,7 +1008,11 @@ class ResponseGenerator:
                         if location_data:
                             latitude = location_data.get('latitude')
                             longitude = location_data.get('longitude')
-                            print(f"   → Fetched location from DB: lat={latitude}, lng={longitude}")
+                            logger.debug(
+                                "   → Fetched location from DB: lat=%s, lng=%s",
+                                latitude,
+                                longitude,
+                            )
                             
                             # Update location_context if it exists, or create it
                             if location_context is None:
@@ -833,16 +1022,27 @@ class ResponseGenerator:
                     finally:
                         db_session.close()
                 except Exception as e:
-                    print(f"⚠️  Failed to fetch location from database: {type(e).__name__}: {e}")
+                    logger.warning(
+                        "⚠️  Failed to fetch location from database for %s: %s: %s",
+                        listing_id,
+                        type(e).__name__,
+                        e,
+                    )
             
             if latitude and longitude:
                 has_amenity_links_flag = True
-                print(f"🗺️  Amenity query detected - will generate links and include reference in response")
+                logger.info(
+                    "🗺️  Amenity query detected - will generate links and include reference in response",
+                )
         
         # 5.5️⃣ Generate amenity links BEFORE prompt creation (so we can include them in the prompt)
         pre_generated_amenity_links = []
         if has_amenity_links_flag and latitude and longitude:
-            print(f"🗺️  Pre-generating amenity links for prompt (lat: {latitude}, lng: {longitude})")
+            logger.info(
+                "🗺️  Pre-generating amenity links for prompt (lat: %s, lng: %s)",
+                latitude,
+                longitude,
+            )
             amenity_links_result = generate_context_aware_links(
                 query=query,
                 latitude=latitude,
@@ -853,12 +1053,18 @@ class ResponseGenerator:
             suggested = amenity_links_result.get('suggested_links', [])
             # Use relevant links if available, otherwise use suggested links
             pre_generated_amenity_links = relevant if relevant else suggested
-            print(f"   → Pre-generated {len(pre_generated_amenity_links)} links for prompt")
+            logger.debug(
+                "   → Pre-generated %d links for prompt",
+                len(pre_generated_amenity_links),
+            )
         
         # 🏘️ Add nearby properties to context if available (for LLM to see)
         if location_context and location_context.get('nearby_properties_json'):
             nearby_props = location_context['nearby_properties_json']
-            print(f"🏘️  Adding {len(nearby_props)} nearby properties to context for LLM")
+            logger.info(
+                "🏘️  Adding %d nearby properties to context for LLM",
+                len(nearby_props),
+            )
             
             # Format nearby properties as text for the LLM
             nearby_context = "\n\n=== NEARBY PROPERTIES ===\n"
@@ -905,83 +1111,56 @@ class ResponseGenerator:
             )
             # Prepend tone context to the main context
             context = tone_prompt_context + "\n\n" + context
-            print(
-                f"🎭 ✅ Injected {tone_level.value.upper()} tone context into PROPERTY prompt "
-                f"({len(tone_prompt_context)} chars)"
+            logger.info(
+                "🎭 ✅ Injected %s tone context into PROPERTY prompt (%d chars)",
+                tone_level.value.upper(),
+                len(tone_prompt_context),
             )
-            print(f"   Tone instruction preview: {tone_prompt_context[:200]}...")
+            logger.debug(
+                "   Tone instruction preview: %s",
+                tone_prompt_context[:200] + "...",
+            )
         else:
-            print(
-                f"🎭 No tone adaptation applied "
-                f"(source={query_source}, tone_level={tone_level.value}, has_context={bool(tone_context)})"
+            logger.debug(
+                "🎭 No tone adaptation applied (source=%s, tone_level=%s, has_context=%s)",
+                query_source,
+                tone_level.value,
+                bool(tone_context),
             )
         
         # 6️⃣ Prompt creation
         # DEBUG: Log context before prompt creation
-        print(f"\n🔍 DEBUG: Before LLM call:")
-        print(f"   Query: '{query}'")
-        print(f"   Query source: {query_source}")
-        print(f"   Context length: {len(context) if context else 0} chars")
-        print(f"   Data sources count: {len(data_sources) if data_sources else 0}")
+        logger.debug("🔍 DEBUG: Before LLM call:")
+        logger.debug("   Query: '%s'", query)
+        logger.debug("   Query source: %s", query_source)
+        logger.debug("   Context length: %d chars", len(context) if context else 0)
+        logger.debug("   Data sources count: %d", len(data_sources) if data_sources else 0)
         if context:
-            print(f"   Context preview (first 500 chars): {context[:500]}...")
+            logger.debug("   Context preview (first 500 chars): %s", context[:500] + "...")
         else:
-            print(f"   ⚠️  WARNING: Context is EMPTY!")
+            logger.debug("   ⚠️  WARNING: Context is EMPTY!")
         
-        # Use different system prompts and user prompts for generic vs property queries.
-        # Additionally, enquiry messages use a separate, formal email-style prompt.
-        if query_source == 'generic':
-            from app.services.rag_pipeline.prompts import create_generic_user_prompt
-            if is_enquiry_message:
-                system_prompt = ENQUIRY_EMAIL_SYSTEM_PROMPT
-                user_prompt = create_enquiry_email_user_prompt(
-                    query=query,
-                    context=context or "",
-                    is_property_query=False,
-                    conversation_history=conversation_history,
-                )
-            else:
-                system_prompt = GENERIC_SYSTEM_PROMPT
-                user_prompt = create_generic_user_prompt(
-                    query, context, conversation_history=conversation_history
-                )
-        else:
-            if is_enquiry_message:
-                system_prompt = ENQUIRY_EMAIL_SYSTEM_PROMPT
-                user_prompt = create_enquiry_email_user_prompt(
-                    query=query,
-                    context=context or "",
-                    is_property_query=True,
-                    conversation_history=conversation_history,
-                )
-            else:
-                system_prompt = SYSTEM_PROMPT
-                if enquiry_type == "bidding":
-                    user_prompt = create_bid_advice_prompt(
-                        query, context, conversation_history=conversation_history
-                    )
-                else:
-                    user_prompt = create_user_prompt(
-                        query,
-                        context,
-                        has_amenity_links=has_amenity_links_flag,
-                        amenity_links_list=pre_generated_amenity_links
-                        if has_amenity_links_flag
-                        else None,
-                        conversation_history=conversation_history,
-                    )
-        
-        print(f"   User prompt length: {len(user_prompt)} chars")
-        print(f"   User prompt preview (first 500 chars): {user_prompt[:500]}...")
-
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.append({"role": "user", "content": user_prompt})
+        # Build messages for generic vs property queries (and enquiry email style).
+        messages = self._build_llm_messages(
+            query=query,
+            context=context or "",
+            query_source=query_source,
+            enquiry_type=enquiry_type,
+            is_enquiry_message=is_enquiry_message,
+            conversation_history=conversation_history,
+            has_amenity_links_flag=has_amenity_links_flag,
+            pre_generated_amenity_links=pre_generated_amenity_links,
+        )
+        user_prompt = messages[-1]["content"] if messages else ""
+        logger.debug("   User prompt length: %d chars", len(user_prompt))
+        logger.debug("   User prompt preview (first 500 chars): %s", user_prompt[:500] + "...")
 
         # 7️⃣ LLM CALL (SAFE)
         needs_vendor_contact = False
         escalation_reason = None
         rate_limit_error = False
-        
+        t_llm_start = time.perf_counter()
+
         try:
             response = create_chat_completion(
                 messages=messages,
@@ -1007,16 +1186,13 @@ class ResponseGenerator:
                 contains_price = any(re.search(pattern, answer, re.IGNORECASE) for pattern in price_patterns)
                 
                 if contains_price:
-                    print(f"🔒 RESPONSE LAYER: Detected price disclosure in answer (displayPrice = false) → replacing with fallback")
+                    logger.info(
+                        "🔒 RESPONSE LAYER: Detected price disclosure in answer (displayPrice = false) → replacing with fallback",
+                    )
                     answer = "Please contact the vendor / Unreserved for pricing details."
         
         except Exception as e:
-            import traceback
-
-            print("❌ LLM ERROR")
-            print(f"Error type: {type(e).__name__}")
-            print(f"Error message: {str(e)}")
-            print(traceback.format_exc())
+            logger.exception("❌ LLM ERROR: %s", e)
 
             error_type = self._classify_llm_error(e)
 
@@ -1157,15 +1333,35 @@ class ResponseGenerator:
             if is_location_query and query_type == 'nearby_properties':
                 nearby_properties_json = location_context.get('nearby_properties_json', [])
                 if nearby_properties_json:
-                    print(f"🏘️  User asked about nearby properties - including {len(nearby_properties_json)} properties in response")
+                    logger.info(
+                        "🏘️  User asked about nearby properties - including %d properties in response",
+                        len(nearby_properties_json),
+                    )
             else:
-                print(f"✅ User did not ask about nearby properties - excluding from response (query_type: {query_type})")
-        
+                logger.debug(
+                    "✅ User did not ask about nearby properties - excluding from response (query_type: %s)",
+                    query_type,
+                )
+
+        now = time.perf_counter()
+        # Merge retriever's fine-grained timers (from last retrieve call) into breakdown
+        try:
+            for k, v in getattr(self.augmenter.retriever, "_last_timings", {}).items():
+                timings_breakdown[f"retrieval_{k}"] = round(v, 2)
+        except Exception:
+            pass
+        eval_timings = {
+            "retrieval_ms": (t_llm_start - t_start) * 1000.0 if t_llm_start is not None else 0.0,
+            "llm_ms": (now - t_llm_start) * 1000.0 if t_llm_start is not None else 0.0,
+            "total_ms": (now - t_start) * 1000.0,
+            "breakdown": {k: round(v, 2) for k, v in timings_breakdown.items()},
+        }
         return {
             "ai_response": ai_response,
             "log_entry": log_entry,
             "nearby_properties": nearby_properties_json,
             "amenity_links": final_amenity_links,
+            "eval_timings": eval_timings,
         }
     
     # ------------------------------------------------------------------
@@ -1267,6 +1463,60 @@ class ResponseGenerator:
 
         return lines
 
+    def _generate_conversational_reply(
+        self,
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
+        """Let the LLM respond naturally to conversational messages (thanks, nice, small talk). No retrieval."""
+        messages = [{"role": "system", "content": CONVERSATIONAL_SYSTEM_PROMPT}]
+        if conversation_history:
+            for msg in conversation_history:
+                role = (msg.get("role") or "user").lower()
+                if role not in ("user", "assistant"):
+                    role = "user"
+                content = msg.get("content") or ""
+                if content.strip():
+                    messages.append({"role": role, "content": content.strip()})
+        messages.append({"role": "user", "content": query})
+        response = create_chat_completion(
+            messages=messages,
+            model=self.model_config["model"],
+            temperature=self.model_config["temperature"],
+            max_tokens=min(150, self.model_config["max_tokens"]),
+        )
+        return (response.choices[0].message.content or "").strip()
+
+    def _classify_intent_listing_vs_conversational(
+        self,
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
+        """Classify whether the user message needs listing data (LISTING) or is conversational (CONVERSATIONAL). Returns 'listing' or 'conversational'."""
+        user_content = f"User message: {query.strip()}"
+        if conversation_history:
+            recent = conversation_history[-4:]  # last 2 exchanges
+            if recent:
+                parts = [f"{m.get('role', 'user')}: {m.get('content', '')}" for m in recent]
+                user_content = "Recent conversation:\n" + "\n".join(parts) + "\n\n" + user_content
+        messages = [
+            {"role": "system", "content": INTENT_CLASSIFIER_SYSTEM},
+            {"role": "user", "content": user_content},
+        ]
+        try:
+            response = create_chat_completion(
+                messages=messages,
+                model=self.model_config["model"],
+                temperature=0,
+                max_tokens=10,
+            )
+            raw = (response.choices[0].message.content or "").strip().upper()
+            if "CONVERSATIONAL" in raw:
+                return "conversational"
+            return "listing"
+        except Exception:
+            return "listing"
+
     def _generate_personal_advice_message(self, query: str) -> str:
         return (
             "I cannot provide personal advice, recommendations, or suggestions about whether to buy, "
@@ -1275,6 +1525,62 @@ class ResponseGenerator:
             "I can help with factual details about the property instead, such as specifications, "
             "pricing information, location details, and property features."
         )
+
+    def _build_llm_messages(
+        self,
+        query: str,
+        context: str,
+        query_source: str,
+        enquiry_type: str,
+        is_enquiry_message: bool,
+        conversation_history: Optional[List[Dict[str, str]]],
+        has_amenity_links_flag: bool,
+        pre_generated_amenity_links: List[Any],
+    ) -> List[Dict[str, str]]:
+        """Build system + user messages for the LLM from context and query."""
+        if query_source == 'generic':
+            from app.services.rag_pipeline.prompts import create_generic_user_prompt
+            if is_enquiry_message:
+                system_prompt = ENQUIRY_EMAIL_SYSTEM_PROMPT
+                user_prompt = create_enquiry_email_user_prompt(
+                    query=query,
+                    context=context or "",
+                    is_property_query=False,
+                    conversation_history=conversation_history,
+                )
+            else:
+                system_prompt = GENERIC_SYSTEM_PROMPT
+                user_prompt = create_generic_user_prompt(
+                    query, context, conversation_history=conversation_history
+                )
+        else:
+            if is_enquiry_message:
+                system_prompt = ENQUIRY_EMAIL_SYSTEM_PROMPT
+                user_prompt = create_enquiry_email_user_prompt(
+                    query=query,
+                    context=context or "",
+                    is_property_query=True,
+                    conversation_history=conversation_history,
+                )
+            else:
+                system_prompt = SYSTEM_PROMPT
+                if enquiry_type == "bidding":
+                    user_prompt = create_bid_advice_prompt(
+                        query, context, conversation_history=conversation_history
+                    )
+                else:
+                    user_prompt = create_user_prompt(
+                        query,
+                        context,
+                        has_amenity_links=has_amenity_links_flag,
+                        amenity_links_list=pre_generated_amenity_links
+                        if has_amenity_links_flag
+                        else None,
+                        conversation_history=conversation_history,
+                    )
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.append({"role": "user", "content": user_prompt})
+        return messages
 
     def _generate_vendor_contact_message(
         self, query: str, reason: Optional[str] = None, is_enquiry_message: bool = False

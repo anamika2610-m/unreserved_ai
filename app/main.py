@@ -92,6 +92,7 @@ async def root():
             "sync_status": "/api/v1/sync/status",
             "admin_listing_summary": "/api/v1/admin/listings/{listing_id}/summary",
             "admin_summaries_generate": "/api/v1/admin/summaries/generate",
+            "admin_cron_status": "/api/v1/admin/cron/status",
             "docs": "/docs",
             "redoc": "/redoc"
         }

@@ -4,18 +4,24 @@ Stores generic PDFs like legislation, buyer guides, auction rules, etc.
 Uses OpenAI embeddings for semantic search.
 """
 import json
+import logging
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.session import SessionLocal
-from app.helpers.ingestion_pipeline.shared.openai_embeddings import OpenAIEmbeddings, VECTOR_DIMENSION
+from app.helpers.ingestion_pipeline.shared.openai_embeddings import (
+    OpenAIEmbeddings,
+    VECTOR_DIMENSION,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -41,19 +47,25 @@ class GenericKnowledgeStore:
     ):
         """
         Initialize generic knowledge store with OpenAI embeddings.
-        
+
         Args:
             embedding_model: OpenAI embedding model name (default: text-embedding-3-small)
             db_session: Optional database session
             openai_api_key: Optional OpenAI API key (defaults to OPENAI_API_KEY env var)
         """
-        print(f"Initializing Generic Knowledge Store with OpenAI embeddings: {embedding_model}")
+        logger.info(
+            "Initializing Generic Knowledge Store with OpenAI embeddings: %s",
+            embedding_model,
+        )
         try:
-            self.embedding_model = OpenAIEmbeddings(api_key=openai_api_key, model=embedding_model)
-            print("✓ Generic Knowledge Store initialized with OpenAI embeddings")
+            self.embedding_model = OpenAIEmbeddings(
+                api_key=openai_api_key,
+                model=embedding_model,
+            )
+            logger.info("✓ Generic Knowledge Store initialized with OpenAI embeddings")
         except Exception as e:
-            print(f"✗ Failed to initialize OpenAI embeddings: {e}")
-            raise RuntimeError(f"Cannot initialize OpenAI embeddings: {e}")
+            logger.exception("✗ Failed to initialize OpenAI embeddings: %s", e)
+            raise RuntimeError(f"Cannot initialize OpenAI embeddings: {e}") from e
         
         self.db_session = db_session or SessionLocal()
         self._owns_session = db_session is None
@@ -134,17 +146,17 @@ class GenericKnowledgeStore:
                 # ivfflat requires significant memory and may not improve performance
                 # for datasets with < 100 rows. Uncomment below for larger datasets:
                 # self.db_session.execute(text("""
-                #     CREATE INDEX IF NOT EXISTS idx_generic_embedding_cosine 
-                #     ON generic_knowledge 
+                #     CREATE INDEX IF NOT EXISTS idx_generic_embedding_cosine
+                #     ON generic_knowledge
                 #     USING ivfflat (embedding vector_cosine_ops) WITH (lists = 10)
                 # """))
-                print("✓ Skipping ivfflat index for small dataset (using sequential scan)")
-                
+                logger.info("✓ Skipping ivfflat index for small dataset (using sequential scan)")
+
                 self.db_session.commit()
-                print("✓ generic_knowledge table ready")
-        
+                logger.info("✓ generic_knowledge table ready")
+
         except Exception as e:
-            print(f"⚠️  Table initialization warning: {e}")
+            logger.warning("⚠️  Table initialization warning: %s", e)
             try:
                 self.db_session.rollback()
             except:
@@ -161,7 +173,7 @@ class GenericKnowledgeStore:
             Number of chunks added
         """
         if not chunks:
-            print("⚠️  No chunks to add")
+            logger.warning("⚠️  No chunks to add")
             return 0
         
         added_count = 0
@@ -211,7 +223,12 @@ class GenericKnowledgeStore:
                 added_count += 1
             
             except Exception as e:
-                print(f"❌ Failed to add chunk {chunk.doc_category}_{chunk.chunk_index}: {e}")
+                logger.exception(
+                    "❌ Failed to add chunk %s_%s: %s",
+                    chunk.doc_category,
+                    chunk.chunk_index,
+                    e,
+                )
                 try:
                     self.db_session.rollback()
                 except:
@@ -220,9 +237,9 @@ class GenericKnowledgeStore:
         # Commit all changes
         try:
             self.db_session.commit()
-            print(f"✓ Added {added_count} generic knowledge chunks")
+            logger.info("✓ Added %d generic knowledge chunks", added_count)
         except Exception as e:
-            print(f"❌ Commit failed: {e}")
+            logger.exception("❌ Commit failed: %s", e)
             self.db_session.rollback()
             return 0
         
@@ -295,21 +312,24 @@ class GenericKnowledgeStore:
             self.db_session.commit()
             
             # DEBUG: Log search results
-            print(f"   🔍 DEBUG Search: Query='{query}', Found {len(rows)} rows from database")
+            logger.debug("🔍 DEBUG Search: Query='%s', Found %d rows from database", query, len(rows))
             if rows:
                 for i, row in enumerate(rows[:3], 1):
                     similarity = float(row[5]) if len(row) > 5 else 0.0
                     content_preview = str(row[3])[:100] if len(row) > 3 else "N/A"
-                    print(f"   🔍 DEBUG Row {i}: similarity={similarity:.4f}, preview='{content_preview}...'")
+                    logger.debug(
+                        "   🔍 DEBUG Row %d: similarity=%.4f, preview='%s...'",
+                        i,
+                        similarity,
+                        content_preview,
+                    )
             else:
-                print(f"   ⚠️  DEBUG: No rows returned from database query")
-            
+                logger.debug("   ⚠️  DEBUG: No rows returned from database query")
+
             return self._format_search_results(rows)
         
         except Exception as e:
-            print(f"❌ Search failed: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("❌ Search failed: %s", e)
             # Ensure rollback on error
             try:
                 self.db_session.rollback()
@@ -372,14 +392,14 @@ class GenericKnowledgeStore:
             with self._handle_errors():
                 result = self.db_session.execute(
                     text("DELETE FROM generic_knowledge WHERE doc_category = :category"),
-                    {'category': doc_category}
+                    {'category': doc_category},
                 )
                 self.db_session.commit()
                 count = result.rowcount
-                print(f"✓ Deleted {count} chunks for category '{doc_category}'")
+                logger.info("✓ Deleted %d chunks for category '%s'", count, doc_category)
                 return count
         except Exception as e:
-            print(f"❌ Delete failed: {e}")
+            logger.exception("❌ Delete failed: %s", e)
             return 0
     
     def get_stats(self) -> Dict[str, Any]:
@@ -409,10 +429,10 @@ class GenericKnowledgeStore:
                 
                 return {
                     'total_chunks': total,
-                    'categories': categories
+                    'categories': categories,
                 }
         except Exception as e:
-            print(f"❌ Stats retrieval failed: {e}")
+            logger.exception("❌ Stats retrieval failed: %s", e)
             return {'total_chunks': 0, 'categories': {}}
     
     def _sanitize_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -451,7 +471,7 @@ class GenericKnowledgeStore:
         if self._owns_session and self.db_session:
             try:
                 self.db_session.close()
-                print("✓ Generic knowledge store session closed")
-            except:
+                logger.info("✓ Generic knowledge store session closed")
+            except Exception:
                 pass
 

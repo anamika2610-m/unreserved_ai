@@ -154,25 +154,25 @@ engine: Engine = create_engine(
 @event.listens_for(engine, "connect")
 def set_postgresql_timeout(dbapi_conn, connection_record):
     """
-    Set PostgreSQL-level timeouts to prevent idle transactions.
-    
+    Set PostgreSQL-level timeouts.
+
     - statement_timeout: Kill queries that run longer than 60 seconds
-    - idle_in_transaction_session_timeout: Kill idle transactions after 60 seconds
-    
-    This is the MOST EFFECTIVE way to prevent "idle in transaction" issues.
+    - lock_timeout: Prevent long waits on locks
+
+    NOTE:
+    We intentionally DO NOT set idle_in_transaction_session_timeout here anymore.
+    That DB-side setting was killing connections while SQLAlchemy was trying
+    to reset them, which produced noisy "idle in transaction timeout" errors
+    even though application code was already committing/rolling back correctly.
     """
     cursor = dbapi_conn.cursor()
     try:
         # Kill queries that run longer than 60 seconds (60000 ms)
         cursor.execute("SET statement_timeout = '60000'")
-        
-        # Kill idle transactions after 60 seconds (60000 ms)
-        # This is the KEY setting to prevent "idle in transaction"
-        cursor.execute("SET idle_in_transaction_session_timeout = '60000'")
-        
+
         # Optional: Set lock timeout to prevent long waits on locks
         cursor.execute("SET lock_timeout = '30000'")  # 30 seconds
-        
+
         cursor.close()
         dbapi_conn.commit()
     except Exception as e:
