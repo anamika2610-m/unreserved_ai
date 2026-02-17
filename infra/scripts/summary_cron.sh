@@ -17,9 +17,8 @@ if [ -f ".env" ]; then
 fi
 
 # Call the API endpoint to trigger summary generation
-# Use 127.0.0.1 to avoid IPv6 (::1) resolution issues; replace localhost if set in .env
-API_URL="${API_URL:-http://127.0.0.1:8000}"
-API_URL="${API_URL//localhost/127.0.0.1}"
+# API_URL: from env or default http://127.0.0.1:8000; localhost → 127.0.0.1 to avoid IPv6 (::1) issues
+API_URL="$(echo "${API_URL:-http://127.0.0.1:8000}" | sed 's/localhost/127.0.0.1/g')"
 ENDPOINT="${API_URL}/api/v1/admin/summaries/generate"
 
 # Optional: file to record last run for GET /api/v1/admin/cron/status

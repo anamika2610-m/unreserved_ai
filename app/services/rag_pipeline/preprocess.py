@@ -13,9 +13,13 @@ Performance:
 - Average latency: ~20ms
 - Cost: ~$0.00001 per query
 """
+import logging
 import re
 from typing import Dict, Optional, Any, List
+
 from app.schemas import BuyerEnquiry
+
+logger = logging.getLogger(__name__)
 
 # Constants
 UUID_PATTERN = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
@@ -111,15 +115,15 @@ Respond with ONLY the topic name, nothing else."""
         )
         
         topic = response.choices[0].message.content.strip()
-        
+
         if topic.upper() == "NONE" or not topic:
             return None
-        
-        print(f"🤖 LLM extracted topic: '{topic}'")
+
+        logger.info("🤖 LLM extracted topic: '%s'", topic)
         return topic
-        
+
     except Exception as e:
-        print(f"⚠️  LLM topic extraction failed: {e}, falling back to regex")
+        logger.warning("⚠️  LLM topic extraction failed: %s, falling back to regex", e)
         return None
 
 
@@ -143,19 +147,19 @@ def extract_suggested_topic_from_history(
     
     if query_normalized not in FOLLOW_UP_TRIGGERS:
         return None
-    
+
     if not conversation_history:
-        print("⚠️  No conversation history for 'yes' response extraction")
+        logger.warning("⚠️  No conversation history for 'yes' response extraction")
         return None
-    
-    print(f"🔍 Attempting to extract suggested topic from {len(conversation_history)} messages")
-    
+
+    logger.info("🔍 Attempting to extract suggested topic from %d messages", len(conversation_history))
+
     # Find the last bot message
     for msg in reversed(conversation_history):
         if msg['role'] in ['assistant', 'bot']:
             bot_content = msg['content']
-            print(f"📜 Checking bot message (first 200 chars): {bot_content[:200]}...")
-            
+            logger.debug("📜 Checking bot message (first 200 chars): %s", bot_content[:200])
+
             # Try LLM extraction first (more robust)
             topic = _extract_topic_with_llm(bot_content)
             
@@ -165,23 +169,23 @@ def extract_suggested_topic_from_history(
                 first_lower = cleaned_topic.lower()
                 is_property_topic = "property's" in first_lower or "property" in first_lower
                 rewritten = _convert_topic_to_question(cleaned_topic, is_property_topic=is_property_topic)
-                print(f"🔄 Rewriting 'yes' → '{rewritten}' (LLM extracted: '{cleaned_topic}')")
+                logger.info("🔄 Rewriting 'yes' → '%s' (LLM extracted: '%s')", rewritten, cleaned_topic)
                 return rewritten
             
             # Fallback to regex patterns (fast, reliable for common cases)
-            print("🔄 LLM extraction failed/returned None, trying regex fallback...")
+            logger.info("🔄 LLM extraction failed/returned None, trying regex fallback...")
             
             for pattern in TOPIC_EXTRACTION_PATTERNS:
                 match = re.search(pattern, bot_content, re.IGNORECASE)
                 if match:
                     first_topic = _clean_topic_text(match.group(1).strip())
-                    print(f"🔍 Extracted topic from bot message: '{first_topic}' (regex pattern matched)")
-                    
+                    logger.info("🔍 Extracted topic from bot message: '%s' (regex pattern matched)", first_topic)
+
                     first_lower = first_topic.lower()
                     is_property_topic = "property's" in first_lower or "property" in first_lower
                     rewritten = _convert_topic_to_question(first_topic, is_property_topic=is_property_topic)
-                    
-                    print(f"🔄 Rewriting 'yes' → '{rewritten}' (regex extracted: '{first_topic}')")
+
+                    logger.info("🔄 Rewriting 'yes' → '%s' (regex extracted: '%s')", rewritten, first_topic)
                     return rewritten
             
             # Final fallback: extract from bold text
@@ -194,10 +198,14 @@ def extract_suggested_topic_from_history(
                         first_lower = first_topic.lower()
                         is_property_topic = "property's" in first_lower or "property" in first_lower
                         rewritten = _convert_topic_to_question(first_topic, is_property_topic=is_property_topic)
-                        print(f"🔄 Rewriting 'yes' → '{rewritten}' (regex bold fallback: '{first_topic}')")
+                        logger.info(
+                            "🔄 Rewriting 'yes' → '%s' (regex bold fallback: '%s')",
+                            rewritten,
+                            first_topic,
+                        )
                         return rewritten
-            
-            print(f"⚠️  Could not extract topic from bot message (tried LLM + regex)")
+
+            logger.warning("⚠️  Could not extract topic from bot message (tried LLM + regex)")
             break
     
     return None

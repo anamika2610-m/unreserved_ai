@@ -1,11 +1,14 @@
 """
 Augmentation module for enriching queries with retrieved context.
 """
+import logging
 from typing import List, Dict, Any, Optional, Tuple
+
 from sqlalchemy import text
-from app.services.rag_pipeline.retrieval import PropertyRetriever
+
 from app.helpers.ingestion_pipeline.generic import GenericKnowledgeStore
 from app.schemas import DataSource
+from app.services.rag_pipeline.retrieval import PropertyRetriever
 
 # Constants
 QUERY_SOURCE_PROPERTY = 'property'
@@ -17,6 +20,9 @@ DEFAULT_LISTING_ID = 'unknown'
 
 CONTENT_PREVIEW_LENGTH = 200
 LISTING_ID_DISPLAY_LENGTH = 20
+
+
+logger = logging.getLogger(__name__)
 
 # Data sufficiency check keywords
 PRICE_KEYWORDS = ['price', 'cost', 'how much']
@@ -138,20 +144,12 @@ class QueryAugmenter:
                 # For nearby_properties queries, use retrieve_with_location_context to fetch nearby properties
                 # For other location queries (amenities, transport), use standard retrieve
                 if query_type == 'nearby_properties':
-                    print(f"🏘️  NEARBY PROPERTIES QUERY DETECTED - calling retrieve_with_location_context")
+                    # Nearby-properties queries: reuse central defaults from the retriever
                     standard_results, location_context = self.retriever.retrieve_with_location_context(
-            query=query,
-            listing_id=listing_id,
+                        query=query,
+                        listing_id=listing_id,
                         n_results=n_results,
-                        max_distance_km=15.0,
-                        max_nearby_properties=5
                     )
-                    print(f"🏘️  retrieve_with_location_context returned:")
-                    print(f"     - {len(standard_results)} results")
-                    print(f"     - location_context: {location_context is not None}")
-                    if location_context:
-                        nearby = location_context.get('nearby_properties_json', [])
-                        print(f"     - {len(nearby)} nearby properties in location_context")
                     # Filter out property_document chunks from results
                     results = [
                         r for r in standard_results
@@ -225,11 +223,15 @@ class QueryAugmenter:
         # This uses the same logic as before (including reranking) but filters to property_document only
         from app.services.rag_pipeline.location_utils import detect_location_query
         is_location_query, _ = detect_location_query(query)
-        
-        print(f"\n🔍 augment_query_pdf_chunks called:")
-        print(f"   Query: '{query}'")
-        print(f"   Listing ID: {listing_id}")
-        print(f"   Requesting {n_results} property_document chunks")
+
+        logger.debug(
+            "augment_query_pdf_chunks called",
+            extra={
+                "query": query,
+                "listing_id": listing_id,
+                "n_results": n_results,
+            },
+        )
         
         # Retrieve property_document chunks using the retriever (includes reranking)
         pdf_results = self.retriever.retrieve(
@@ -239,12 +241,18 @@ class QueryAugmenter:
             chunk_types=['property_document'],
             allow_hybrid=False  # Don't add other chunks, only property_document
         )
-        
-        print(f"✅ Retrieved {len(pdf_results)} PDF chunks:")
+
+        logger.info("Retrieved %d PDF chunks for augmentation", len(pdf_results))
         for i, r in enumerate(pdf_results[:5]):  # Show first 5
-            print(f"   [{i+1}] chunk_type={r.get('chunk_type', 'unknown')}, "
-                  f"similarity={r.get('similarity', 0):.3f}, "
-                  f"content_preview={r.get('content', '')[:100]}...")
+            logger.debug(
+                "PDF chunk %d preview",
+                i + 1,
+                extra={
+                    "chunk_type": r.get("chunk_type", "unknown"),
+                    "similarity": r.get("similarity", 0),
+                    "content_preview": r.get("content", "")[:100],
+                },
+            )
         
         # For location queries, we still need location context
         location_context = None
@@ -294,7 +302,10 @@ class QueryAugmenter:
             if location_context:
                 nearby_props = location_context.get('nearby_properties_json', [])
                 if nearby_props:
-                    print(f"✅ SUFFICIENT: Found {len(nearby_props)} nearby properties in location_context")
+                    logger.info(
+                        "Data sufficient: found %d nearby properties in location_context",
+                        len(nearby_props),
+                    )
                     return True, None
             # Otherwise, check if context mentions nearby properties
             if 'nearby properties' in context_lower or 'found 0 properties near' not in context_lower:
@@ -335,11 +346,11 @@ class QueryAugmenter:
                            'supermarkets', 'transport', 'bus', 'train', 'tram', 'station',
                            'park', 'parks', 'shopping', 'cafe', 'cafes', 'restaurant', 'restaurants']
         if any(kw in query_lower for kw in amenity_keywords):
-            print(f"🔍 Amenity query detected in sufficiency check: query_lower='{query_lower}'")
+            logger.debug("Amenity query detected in sufficiency check", extra={"query_lower": query_lower})
             # Check if context contains ACTUAL amenity information (not just the keyword)
             # Look for patterns like "nearby schools:", "school is", "schools within", distances, etc.
             query_amenities = [kw for kw in amenity_keywords if kw in query_lower]
-            print(f"   Query amenities: {query_amenities}")
+            logger.debug("Amenity query terms", extra={"query_amenities": query_amenities})
             
             # Smart check: Look for amenity information patterns, not just keywords
             has_amenity_info = False
@@ -363,13 +374,21 @@ class QueryAugmenter:
                     has_amenity_info = True
                     break
             
-            print(f"   Context contains amenity info patterns? {has_amenity_info}")
-            print(f"   Context preview: {context_lower[:300]}")
+            logger.debug(
+                "Amenity context inspection",
+                extra={
+                    "has_amenity_info": has_amenity_info,
+                    "context_preview": context_lower[:300],
+                },
+            )
             if not has_amenity_info:
-                print(f"   ❌ INSUFFICIENT: Amenity information not in JSON chunks (keyword found but no actual amenity data)")
+                logger.info(
+                    "Data insufficient: amenity information not in JSON chunks despite keyword match",
+                    extra={"query_amenities": query_amenities},
+                )
                 return False, f"Amenity information ({', '.join(query_amenities)}) not found in JSON chunks - should check property PDFs."
             else:
-                print(f"   ✅ SUFFICIENT: Actual amenity info found in JSON chunks")
+                logger.info("Data sufficient: amenity info found in JSON chunks")
         
         # Check aerial view / view queries
         # View/aerial information is typically in property PDFs, not JSON chunks
@@ -380,7 +399,7 @@ class QueryAugmenter:
                         ('view' in query_lower and ('what' in query_lower or 'show' in query_lower or 'does' in query_lower)))
         
         if is_view_query:
-            print(f"🔍 Aerial/view QUERY detected in sufficiency check: '{query_lower}'")
+            logger.debug("Aerial/view query detected in sufficiency check", extra={"query_lower": query_lower})
             
             # Check if this is a property_document chunk (PDF) - if so, be more lenient
             # Count how many sources are property_document vs other types
@@ -397,7 +416,14 @@ class QueryAugmenter:
             # If we have ANY PDF chunks, treat as PDF check (be lenient)
             # If we have ONLY JSON chunks, treat as JSON check (be strict)
             is_pdf_chunk = pdf_chunk_count > 0
-            print(f"   Debug: pdf_chunk_count={pdf_chunk_count}, json_chunk_count={json_chunk_count}, is_pdf_chunk={is_pdf_chunk}")
+            logger.debug(
+                "View query chunk type counts",
+                extra={
+                    "pdf_chunk_count": pdf_chunk_count,
+                    "json_chunk_count": json_chunk_count,
+                    "is_pdf_chunk": is_pdf_chunk,
+                },
+            )
             
             if is_pdf_chunk:
                 # For PDF chunks, be more lenient - if we have property document chunks, they likely contain relevant info
@@ -408,22 +434,34 @@ class QueryAugmenter:
                     'adjacent', 'nearby', 'area', 'district', 'street', 'road'
                 ]
                 has_property_info = any(pattern in context_lower for pattern in property_description_patterns)
-                print(f"   Context is from property PDF chunks")
-                print(f"   Context contains property description info? {has_property_info}")
-                print(f"   Context preview: {context_lower[:400]}")
+                logger.debug(
+                    "PDF context for view query",
+                    extra={
+                        "has_property_info": has_property_info,
+                        "context_preview": context_lower[:400],
+                    },
+                )
                 if not has_property_info:
-                    print(f"   ❌ INSUFFICIENT: Property description information not found in PDF chunks")
+                    logger.info("Data insufficient: property description information not found in PDF chunks")
                     return False, f"Property description information not found in PDF chunks."
                 else:
-                    print(f"   ✅ SUFFICIENT: Property PDF chunks contain relevant information (will let LLM determine if it answers aerial view question)")
+                    logger.info(
+                        "Data sufficient: property PDF chunks contain relevant info; deferring to LLM for aerial view answer"
+                    )
                     return True, None
             else:
                 # For JSON chunks, ALWAYS return False for aerial view queries
                 # JSON chunks (overview, pricing, specifications, location) NEVER contain aerial view descriptions
                 # Aerial view information is ONLY in property_document (PDF) chunks
-                print(f"   Context is from JSON chunks (chunk_types: {[s.chunk_type for s in data_sources if hasattr(s, 'chunk_type')]})")
-                print(f"   Context preview: {context_lower[:400]}")
-                print(f"   ❌ INSUFFICIENT: JSON chunks never contain aerial view descriptions - must check property PDFs")
+                logger.info(
+                    "Data insufficient: JSON chunks cannot satisfy aerial view query; must check property PDFs",
+                    extra={
+                        "chunk_types": [
+                            getattr(s, "chunk_type", None) for s in data_sources if hasattr(s, "chunk_type")
+                        ],
+                        "context_preview": context_lower[:400],
+                    },
+                )
                 return False, f"Aerial view information not found in JSON chunks - should check property PDFs."
         
         # Check property category queries
@@ -442,13 +480,22 @@ class QueryAugmenter:
         if data_sources:
             # Check top similarity score
             top_similarity = data_sources[0].similarity_score if data_sources[0].similarity_score is not None else 0.0
-            
+
             # If similarity is decent (>0.25), trust the retrieval
             if top_similarity > 0.25:
-                print(f"   ✅ SUFFICIENT: Retrieved {len(data_sources)} chunks with good similarity ({top_similarity:.4f} > 0.25)")
+                logger.info(
+                    "Data sufficient based on similarity",
+                    extra={
+                        "chunk_count": len(data_sources),
+                        "top_similarity": top_similarity,
+                    },
+                )
                 return True, None
             else:
-                print(f"   ⚠️  LOW SIMILARITY: Top chunk similarity is {top_similarity:.4f} (< 0.25)")
+                logger.info(
+                    "Low similarity from retrieval; running keyword sufficiency check",
+                    extra={"top_similarity": top_similarity},
+                )
                 # Don't immediately fail - check if query keywords appear in context as fallback
                 stop_words = {'what', 'is', 'the', 'are', 'does', 'do', 'can', 'you', 'tell', 'me', 
                              'about', 'show', 'of', 'in', 'on', 'at', 'to', 'for', 'a', 'an', 'this',
@@ -458,24 +505,34 @@ class QueryAugmenter:
                 if query_words:
                     matching_words = [w for w in query_words if w in context_lower]
                     match_ratio = len(matching_words) / len(query_words) if query_words else 0
-                    
-                    print(f"   🔍 Keyword check: {len(matching_words)}/{len(query_words)} query keywords found (ratio: {match_ratio:.2f})")
-                    print(f"      Query keywords: {query_words[:5]}")
-                    print(f"      Matching: {matching_words[:5]}")
-                    
+
+                    logger.debug(
+                        "Keyword sufficiency check",
+                        extra={
+                            "matching_count": len(matching_words),
+                            "query_count": len(query_words),
+                            "match_ratio": match_ratio,
+                            "sample_query_keywords": query_words[:5],
+                            "sample_matching": matching_words[:5],
+                        },
+                    )
+
                     if match_ratio >= 0.3:
-                        print(f"   ✅ SUFFICIENT: Keyword match ratio acceptable ({match_ratio:.2f} >= 0.3)")
+                        logger.info(
+                            "Data sufficient based on keyword match ratio",
+                            extra={"match_ratio": match_ratio},
+                        )
                         return True, None
                     else:
-                        print(f"   ❌ INSUFFICIENT: Low keyword match and low similarity")
+                        logger.info("Data insufficient: low keyword match and low similarity")
                         return False, "Retrieved chunks have low similarity and don't contain query keywords"
                 else:
                     # No meaningful query words - trust the similarity
-                    print(f"   ✅ SUFFICIENT: No meaningful keywords to check, trusting retrieval")
+                    logger.info("Data sufficient: no meaningful query keywords; trusting retrieval similarity")
                     return True, None
         
         # If we reach here, we have chunks with decent similarity
-        print(f"   ✅ SUFFICIENT: Data sources present")
+        logger.info("Data sufficient: data sources present")
         return True, None
     
     def _augment_generic_query(
@@ -496,15 +553,20 @@ class QueryAugmenter:
         # Check if store has data first
         stats = self.generic_store.get_stats()
         total_chunks = stats.get('total_chunks', 0)
-        
+
         if total_chunks == 0:
-            print("⚠️  Generic knowledge store is EMPTY - no documents have been ingested")
-            print("   Run: python app/helpers/ingestion_pipeline/generic/sync_generic_pdfs.py to ingest PDFs")
+            logger.warning(
+                "Generic knowledge store is EMPTY - no documents have been ingested. "
+                "Run sync_generic_pdfs.py to ingest PDFs."
+            )
             return ("",  # Empty context string to indicate no results
                    [],  # Empty data sources
                    None)
-        
-        print(f"🔍 Searching generic knowledge store (has {total_chunks} chunks) for: '{query}'")
+
+        logger.info(
+            "Searching generic knowledge store",
+            extra={"total_chunks": total_chunks, "query": query},
+        )
         
         # DEBUG: Check if AML content exists in the store
         if 'aml' in query.lower() or 'anti-money laundering' in query.lower():
@@ -520,7 +582,10 @@ class QueryAugmenter:
                 result = self.generic_store.db_session.execute(debug_query)
                 aml_count = result.scalar()
                 result.close()
-                print(f"   🔍 DEBUG: Found {aml_count} chunks containing 'aml' or 'anti-money laundering' in content")
+                logger.debug(
+                    "AML debug: found chunks containing aml/anti-money laundering",
+                    extra={"aml_chunk_count": aml_count},
+                )
                 
                 # Also show a sample if found
                 if aml_count > 0:
@@ -537,15 +602,18 @@ class QueryAugmenter:
                     sample_row = sample_result.fetchone()
                     sample_result.close()
                     if sample_row:
-                        print(f"   🔍 DEBUG Sample: {sample_row[0]}...")
-                
+                        logger.debug(
+                            "AML debug sample",
+                            extra={"sample_preview": sample_row[0]},
+                        )
+
                 # Commit debug queries to prevent idle transactions
                 self.generic_store.db_session.commit()
             except Exception as e:
-                print(f"   ⚠️  DEBUG check failed: {e}")
+                logger.exception("Generic store AML debug check failed", exc_info=e)
                 try:
                     self.generic_store.db_session.rollback()
-                except:
+                except Exception:
                     pass
         
         # Normalize query to fix common typos
@@ -563,76 +631,190 @@ class QueryAugmenter:
         # AML expansion
         if 'aml' in query_lower and 'anti-money laundering' not in query_lower:
             # Expand "aml" to "anti-money laundering" for better semantic matching
-            expanded_query = normalized_query.replace('aml', 'anti-money laundering').replace('AML', 'anti-money laundering')
-            print(f"   Normalized query: '{query}' → '{normalized_query}'")
-            print(f"   Expanded query: '{normalized_query}' → '{expanded_query}'")
+            expanded_query = normalized_query.replace('aml', 'anti-money laundering').replace(
+                'AML', 'anti-money laundering'
+            )
+            logger.debug(
+                "Generic store AML expansion",
+                extra={
+                    "original_query": query,
+                    "normalized_query": normalized_query,
+                    "expanded_query": expanded_query,
+                },
+            )
         elif 'anti-money laundering' in query_lower and 'aml' not in query_lower:
             # Also search with "aml" abbreviation
-            expanded_query = normalized_query.replace('anti-money laundering', 'aml anti-money laundering')
-            print(f"   Normalized query: '{query}' → '{normalized_query}'")
-            print(f"   Expanded query: '{normalized_query}' → '{expanded_query}'")
-        
+            expanded_query = normalized_query.replace(
+                'anti-money laundering', 'aml anti-money laundering'
+            )
+            logger.debug(
+                "Generic store AML expansion (abbrev)",
+                extra={
+                    "original_query": query,
+                    "normalized_query": normalized_query,
+                    "expanded_query": expanded_query,
+                },
+            )
+
         # Licensing expansion
         elif 'licensing' in query_lower or 'license' in query_lower or 'licence' in query_lower:
             # Expand licensing queries to include variations
-            expanded_query = f"{normalized_query} victorian estate agent license qualification certificate IV real estate"
-            print(f"   Normalized query: '{query}' → '{normalized_query}'")
-            print(f"   Expanded query for licensing: '{normalized_query}' → '{expanded_query}'")
-        
+            expanded_query = (
+                f"{normalized_query} victorian estate agent license qualification certificate IV real estate"
+            )
+            logger.debug(
+                "Generic store licensing expansion",
+                extra={
+                    "original_query": query,
+                    "normalized_query": normalized_query,
+                    "expanded_query": expanded_query,
+                },
+            )
+
         # Penalties/violations expansion
-        elif 'penalt' in query_lower or 'violation' in query_lower or 'breach' in query_lower or 'fine' in query_lower:
+        elif (
+            'penalt' in query_lower
+            or 'violation' in query_lower
+            or 'breach' in query_lower
+            or 'fine' in query_lower
+        ):
             # Expand penalties queries to include variations
-            expanded_query = f"{normalized_query} estate agents act penalties fines breaches trust account underquoting"
-            print(f"   Normalized query: '{query}' → '{normalized_query}'")
-            print(f"   Expanded query for penalties: '{normalized_query}' → '{expanded_query}'")
-        
+            expanded_query = (
+                f"{normalized_query} estate agents act penalties fines breaches trust account underquoting"
+            )
+            logger.debug(
+                "Generic store penalties expansion",
+                extra={
+                    "original_query": query,
+                    "normalized_query": normalized_query,
+                    "expanded_query": expanded_query,
+                },
+            )
+
         # Vendor disclosure/statement expansion
-        elif 'vendor disclosure' in query_lower or 'vendor statement' in query_lower or 'section 32' in query_lower:
+        elif (
+            'vendor disclosure' in query_lower
+            or 'vendor statement' in query_lower
+            or 'section 32' in query_lower
+        ):
             # Expand vendor disclosure queries to include all related terms
-            expanded_query = f"{normalized_query} vendor statement section 32 section 32 statement vendor disclosure statement statement of information"
-            print(f"   Normalized query: '{query}' → '{normalized_query}'")
-            print(f"   Expanded query for vendor disclosure: '{normalized_query}' → '{expanded_query}'")
-        
+            expanded_query = (
+                f"{normalized_query} vendor statement section 32 section 32 statement vendor disclosure "
+                f"statement statement of information"
+            )
+            logger.debug(
+                "Generic store vendor disclosure expansion",
+                extra={
+                    "original_query": query,
+                    "normalized_query": normalized_query,
+                    "expanded_query": expanded_query,
+                },
+            )
+
         # Process queries expansion (buying process, auction process, deposit handling)
-        elif 'buying process' in query_lower or 'purchase process' in query_lower or 'sale process' in query_lower:
+        elif (
+            'buying process' in query_lower
+            or 'purchase process' in query_lower
+            or 'sale process' in query_lower
+        ):
             # Expand process queries to include related terms
-            expanded_query = f"{normalized_query} buying process purchase process sale process settlement conveyancing steps"
-            print(f"   Normalized query: '{query}' → '{normalized_query}'")
-            print(f"   Expanded query for process: '{normalized_query}' → '{expanded_query}'")
-        elif 'auction' in query_lower and ('process' in query_lower or 'work' in query_lower or 'function' in query_lower or 'how' in query_lower or 'explain' in query_lower):
+            expanded_query = (
+                f"{normalized_query} buying process purchase process sale process settlement conveyancing steps"
+            )
+            logger.debug(
+                "Generic store process expansion",
+                extra={
+                    "original_query": query,
+                    "normalized_query": normalized_query,
+                    "expanded_query": expanded_query,
+                },
+            )
+        elif 'auction' in query_lower and (
+            'process' in query_lower
+            or 'work' in query_lower
+            or 'function' in query_lower
+            or 'how' in query_lower
+            or 'explain' in query_lower
+        ):
             # Expand auction process queries
-            expanded_query = f"{normalized_query} auction rules how auctions must be conducted auction process how auctions work auction procedure bidding process"
-            print(f"   Normalized query: '{query}' → '{normalized_query}'")
-            print(f"   Expanded query for auction process: '{normalized_query}' → '{expanded_query}'")
-        elif 'deposit' in query_lower and ('handl' in query_lower or 'requirement' in query_lower or 'manage' in query_lower):
+            expanded_query = (
+                f"{normalized_query} auction rules how auctions must be conducted auction process how auctions "
+                f"work auction procedure bidding process"
+            )
+            logger.debug(
+                "Generic store auction process expansion",
+                extra={
+                    "original_query": query,
+                    "normalized_query": normalized_query,
+                    "expanded_query": expanded_query,
+                },
+            )
+        elif 'deposit' in query_lower and (
+            'handl' in query_lower or 'requirement' in query_lower or 'manage' in query_lower
+        ):
             # Expand deposit handling queries
-            expanded_query = f"{normalized_query} deposit handling trust account buyer deposit requirements deposit management"
-            print(f"   Normalized query: '{query}' → '{normalized_query}'")
-            print(f"   Expanded query for deposit: '{normalized_query}' → '{expanded_query}'")
-        
+            expanded_query = (
+                f"{normalized_query} deposit handling trust account buyer deposit requirements deposit management"
+            )
+            logger.debug(
+                "Generic store deposit expansion",
+                extra={
+                    "original_query": query,
+                    "normalized_query": normalized_query,
+                    "expanded_query": expanded_query,
+                },
+            )
+
         elif normalized_query != query:
-            print(f"   Normalized query: '{query}' → '{normalized_query}'")
+            logger.debug(
+                "Generic store normalization",
+                extra={
+                    "original_query": query,
+                    "normalized_query": normalized_query,
+                },
+            )
         
         # Search generic knowledge store with expanded query
         # Use a higher n_results to ensure we get results even if similarity is low
         results = self.generic_store.search(expanded_query, n_results=max(n_results, 10))
-        
+
         # Debug: Print similarity scores
         if results:
-            print(f"✅ Found {len(results)} results from generic knowledge store")
             top_similarity = results[0].get('similarity', 0.0) if results else 0.0
+            logger.info(
+                "Generic store search results",
+                extra={
+                    "result_count": len(results),
+                    "top_similarity": top_similarity,
+                },
+            )
             for i, result in enumerate(results[:3], 1):  # Show top 3
                 sim = result.get('similarity', 0.0)
                 content_preview = result.get('content', '')[:100]
-                print(f"   Result {i}: similarity={sim:.4f}, preview='{content_preview}...'")
-            
+                logger.debug(
+                    "Generic store result preview",
+                    extra={
+                        "index": i,
+                        "similarity": sim,
+                        "content_preview": content_preview,
+                    },
+                )
+
             # If top similarity is too low (< 0.3), treat as no results and trigger keyword fallback
             if top_similarity < 0.3:
-                print(f"⚠️  Top similarity ({top_similarity:.4f}) is too low, triggering keyword fallback")
+                logger.info(
+                    "Generic store top similarity too low; triggering keyword fallback",
+                    extra={"top_similarity": top_similarity},
+                )
                 results = []  # Clear results to trigger keyword fallback
         else:
-            print(f"⚠️  Generic knowledge store returned no results for query: '{expanded_query}'")
-            print(f"   Store has {total_chunks} chunks but none matched the query")
+            logger.info(
+                "Generic knowledge store returned no results for expanded query",
+                extra={
+                    "expanded_query": expanded_query,
+                    "total_chunks": total_chunks,
+                },
+            )
             
             # Try fallback queries in order of specificity
             fallback_queries = []

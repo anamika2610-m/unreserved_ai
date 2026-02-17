@@ -378,30 +378,24 @@ def extract_amenity_search_terms(query: str) -> List[str]:
             # Skip if the search term is only generic amenity terms (amenities, places, etc.)
             # These should trigger fallback to predefined amenities instead
             search_term_lower = search_term.lower().rstrip('.')  # Remove trailing period
-            
+
             # Check if the entire search term is a generic term (exact match)
             if search_term_lower in GENERIC_AMENITY_TERMS:
-                print(f"   ⚠️  Skipping generic term: '{search_term}'")
+                # Skipping generic term is intentional; no side-effects needed here.
                 continue  # Skip exact generic terms
-            
+
             if any(generic_term in search_term_lower for generic_term in GENERIC_AMENITY_TERMS):
                 # If the term contains ONLY generic words, skip it
                 words_in_term = search_term_lower.split()
                 if all(word in GENERIC_AMENITY_TERMS for word in words_in_term):
-                    print(f"   ⚠️  Skipping generic-only term: '{search_term}'")
+                    # Again, we intentionally skip generic-only terms to avoid noisy links.
                     continue  # Skip generic-only terms
-            
+
             # Validation - should be 1-3 words and at least 3 characters total
             if 1 <= len(filtered_words) <= 3 and len(search_term) >= 3:
                 search_terms.append(search_term)
-            else:
-                print(f"   ⚠️  Skipping invalid term (length): '{search_term}'")
-    
+
     # Final check: if all extracted terms are generic, return empty list (no links)
-    if search_terms:
-        print(f"✅ Extracted {len(search_terms)} search terms: {search_terms}")
-    else:
-        print(f"⚠️  No valid search terms extracted (query too generic)")
     
     return search_terms
 
