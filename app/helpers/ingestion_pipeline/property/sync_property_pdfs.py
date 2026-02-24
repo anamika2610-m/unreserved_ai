@@ -21,6 +21,7 @@ from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
 from dotenv import load_dotenv
+from sqlalchemy import text
 
 # Load environment variables
 load_dotenv()
@@ -32,7 +33,7 @@ project_root = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(project_root.resolve()))
 
 from app.db.session import SessionLocal
-from app.db.postgres.repositories import ListingRepository
+from app.db.postgres.repositories import SyncListingRepository
 from app.helpers.ingestion_pipeline.property.property_pdf_processor import PropertyPDFProcessor
 from app.helpers.ingestion_pipeline.property.pgvector_store import PgVectorStore
 
@@ -54,31 +55,81 @@ def get_db_session():
 
 
 def _fetch_listings(
-    listing_repo: ListingRepository,
+    repo: SyncListingRepository,
     listing_ids: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
     """
     Fetch listings from database.
     
     Args:
-        listing_repo: Listing repository instance
+        repo: SyncListingRepository
         listing_ids: Optional list of specific listing IDs
-        
+
     Returns:
         List of listing dictionaries
     """
-    print("\n📊 Fetching listings from database via repository...")
+    print("\n📊 Fetching listings from database via SyncListingRepository...")
     if listing_ids:
-        listings = listing_repo.fetch_listings(
+        listings = repo.fetch_listings(
             listing_ids=listing_ids,
-            listing_status=None  # Don't filter by status for specific listings
+            listing_status=None,  # Don't filter by status for specific listings
         )
         print(f"   ✓ Fetched {len(listings)} specified listings")
     else:
-        listings = listing_repo.fetch_listings(listing_status="active")
+        listings = repo.fetch_listings(listing_status="active")
         print(f"   ✓ Fetched {len(listings)} active listings")
-    
+
     return listings
+
+
+def _fetch_property_documents(repo: SyncListingRepository, listing_id: str) -> List[Dict[str, Any]]:
+    """
+    Fetch PUBLIC PDF documents for a listing using the sync session.
+
+    Mirrors ListingRepository.fetch_property_documents but uses SyncListingRepository.
+    """
+    query_str = """
+        SELECT 
+            pm.id,
+            pm.display_order as "displayOrder",
+            pm.category,
+            mm.id as "metadataId",
+            mm.file_name as "fileName",
+            mm.file_url as "fileUrl",
+            mm.file_type as "fileType",
+            mm.alt_text as "altText"
+        FROM listings l
+        LEFT JOIN properties p ON l.property_id = p.id
+        LEFT JOIN property_media pm ON p.id = pm.property_id
+        LEFT JOIN media_metadata mm ON pm.file_id = mm.id
+        WHERE l.id = :listing_id
+        AND pm.category IN ('floor_plan', 'other')
+        AND pm.is_public = true
+        AND mm.file_type = 'pdf'
+        ORDER BY pm.display_order
+    """
+
+    result = repo.session.execute(text(query_str), {"listing_id": listing_id})
+    rows = result.fetchall()
+
+    documents: List[Dict[str, Any]] = []
+    for row in rows:
+        row_dict = dict(row._mapping)
+        documents.append(
+            {
+                "id": row_dict.get("id"),
+                "displayOrder": row_dict.get("displayOrder"),
+                "mediaMetadata": {
+                    "id": row_dict.get("metadataId"),
+                    "fileName": row_dict.get("fileName"),
+                    "fileUrl": row_dict.get("fileUrl"),
+                    "fileType": row_dict.get("fileType"),
+                    "altText": row_dict.get("altText"),
+                },
+            }
+        )
+
+    return documents
 
 
 def _process_listing_documents(
@@ -168,15 +219,15 @@ def sync_property_pdfs(listing_ids: Optional[List[str]] = None) -> None:
     print("=" * SEPARATOR_LENGTH)
     
     with get_db_session() as db:
-        listing_repo = ListingRepository(db)
-        
+        repo = SyncListingRepository(db)
+
         # Initialize processors
         pdf_processor = PropertyPDFProcessor(chunk_size=DEFAULT_CHUNK_SIZE)
-        
+
         # Use context manager for vector store to ensure proper cleanup
         with PgVectorStore() as vector_store:
             # Fetch listings from database
-            listings = _fetch_listings(listing_repo, listing_ids)
+            listings = _fetch_listings(repo, listing_ids)
             
             # Process each listing and fetch property documents
             total_chunks = 0
@@ -186,8 +237,8 @@ def sync_property_pdfs(listing_ids: Optional[List[str]] = None) -> None:
             for listing in listings:
                 listing_id = listing.get('id')
                 
-                # Fetch property documents from database via repository
-                property_docs = listing_repo.fetch_property_documents(listing_id)
+                # Fetch property documents from database
+                property_docs = _fetch_property_documents(repo, listing_id)
                 
                 if not property_docs:
                     continue
