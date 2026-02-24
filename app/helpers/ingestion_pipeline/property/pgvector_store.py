@@ -230,13 +230,15 @@ class PgVectorStore:
         logger.info("Storing in PostgreSQL...")
         added_count = 0
         updated_count = 0
-        
+        listings_touched = set()
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 for chunk, embedding in zip(chunks, embeddings):
                     # Logical key for upserts: (listing_id, chunk_type, chunk_index)
                     listing_id_str = str(chunk.listing_id)
+                    listings_touched.add(listing_id_str)
 
                     existing = (
                         self.db_session.query(PropertyEmbedding)
@@ -259,6 +261,10 @@ class PgVectorStore:
                         existing.embedding = embedding_list
                         existing.chunk_metadata = sanitized_metadata
                         updated_count += 1
+                        logger.debug(
+                            "Embedding updated: listing_id=%s chunk_type=%s chunk_index=%s",
+                            listing_id_str, chunk.chunk_type, chunk.chunk_index,
+                        )
                     else:
                         import uuid
 
@@ -273,12 +279,23 @@ class PgVectorStore:
                         )
                         self.db_session.add(new_embedding)
                         added_count += 1
+                        logger.debug(
+                            "Embedding created: listing_id=%s chunk_type=%s chunk_index=%s",
+                            listing_id_str, chunk.chunk_type, chunk.chunk_index,
+                        )
                 
                 self.db_session.commit()
                 logger.info(
                     "✓ Added %d new chunks, updated %d existing chunks",
                     added_count,
                     updated_count,
+                )
+                list_preview = sorted(listings_touched)[:20]
+                if len(listings_touched) > 20:
+                    list_preview.append("...")
+                logger.info(
+                    "[EMBED] property_embeddings: created=%d updated=%d listings=%s",
+                    added_count, updated_count, list_preview,
                 )
                 break  # Success, exit retry loop
                 

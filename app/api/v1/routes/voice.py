@@ -13,7 +13,10 @@ from dotenv import load_dotenv
 _project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
 load_dotenv(_project_root / ".env")
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, Query, Request
+
+from app.core.exceptions import BadRequestError, InternalServerError, ServiceUnavailableError
+from app.core.rate_limiter import rate_limit
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
@@ -44,7 +47,9 @@ class TranscriptionResponse(BaseModel):
     response_model=TranscriptionResponse,
     response_model_exclude_none=True,
 )
+@rate_limit("20/minute")
 async def transcribe_voice(
+    request: Request,
     file: UploadFile = File(..., description="Audio file to transcribe (mp3, mp4, mpeg, mpga, m4a, wav, webm)"),
 ) -> TranscriptionResponse:
     """
@@ -73,8 +78,7 @@ async def transcribe_voice(
         file_extension = os.path.splitext(file.filename or '')[1].lower()
         
         if file_extension not in allowed_extensions:
-            raise HTTPException(
-                status_code=400,
+            raise BadRequestError(
                 detail=f"Unsupported file type. Allowed: {', '.join(allowed_extensions)}"
             )
         
@@ -82,10 +86,7 @@ async def transcribe_voice(
         try:
             llm_client = get_llm_client()
         except ValueError as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"OpenAI client not available: {str(e)}"
-            )
+            raise InternalServerError(detail=f"OpenAI client not available: {str(e)}")
         
         # Create temporary file for audio
         with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
@@ -133,10 +134,7 @@ async def transcribe_voice(
         except Exception as e:
             print(f"❌ Transcription failed: {e}")
             print(traceback.format_exc())
-            raise HTTPException(
-                status_code=500,
-                detail=f"Transcription failed: {str(e)}"
-            )
+            raise InternalServerError(detail=f"Transcription failed: {str(e)}")
     
     finally:
         # SECURITY: Immediately delete the temporary file
@@ -159,7 +157,9 @@ async def transcribe_voice(
     response_model=dict,
     response_model_exclude_none=True,
 )
+@rate_limit("20/minute")
 async def transcribe_and_chat(
+    request: Request,
     file: UploadFile = File(..., description="Audio file to transcribe"),
     listing_id: Optional[str] = Form(None, description="Optional listing ID"),
     user_id: Optional[str] = Form(None, description="Optional user ID"),
@@ -181,7 +181,7 @@ async def transcribe_and_chat(
     ```
     """
     from app.api.v1.routes.chat import ChatRequest, chat_message, get_generator
-    from app.db.session import get_db
+    from app.db.connection import get_db
     from uuid import UUID as UUIDType
     
     # Helper function to safely convert string to UUID
@@ -196,52 +196,50 @@ async def transcribe_and_chat(
     
     # Get dependencies
     generator = get_generator()
-    db = next(get_db())
     
-    try:
-        # First, transcribe the audio
-        transcription_result = await transcribe_voice(file)
-        transcribed_text = transcription_result.text
-        
-        # Then, use the transcribed text in the chat endpoint
-        chat_request = ChatRequest(
-            question=transcribed_text,
-            listing_id=safe_uuid_convert(listing_id),
-            user_id=safe_uuid_convert(user_id),
-            conversation_id=safe_uuid_convert(conversation_id),
-        )
-        
-        # Call chat endpoint with transcribed text
-        chat_response = await chat_message(chat_request, generator, db)
-        
-        return {
-            "transcription": {
-                "text": transcribed_text,
-                "language": transcription_result.language,
-                "duration": transcription_result.duration,
-            },
-            "conversation_id": str(chat_response.conversation_id),  # Same conversation_id for both
-            "user_message": {
-                "role": "user",
-                "content": transcribed_text,  # Transcribed text as user message
+    # Use async session from connection.py
+    from app.db.connection import get_session_maker
+    session_maker = get_session_maker()
+    
+    async with session_maker() as db:
+        try:
+            # First, transcribe the audio
+            transcription_result = await transcribe_voice(request, file)
+            transcribed_text = transcription_result.text
+            
+            # Then, use the transcribed text in the chat endpoint
+            chat_request = ChatRequest(
+                question=transcribed_text,
+                listing_id=safe_uuid_convert(listing_id),
+                user_id=safe_uuid_convert(user_id),
+                conversation_id=safe_uuid_convert(conversation_id),
+            )
+            
+            # Call chat endpoint with transcribed text (pass Request for rate-limit context)
+            chat_response = await chat_message(request, chat_request, generator, db)
+            
+            return {
+                "transcription": {
+                    "text": transcribed_text,
+                    "language": transcription_result.language,
+                    "duration": transcription_result.duration,
+                },
                 "conversation_id": str(chat_response.conversation_id),
-            },
-            "chat_response": chat_response.dict(),  # Bot response with same conversation_id
-        }
-    
-    except Exception as e:
-        print(f"❌ Chat processing failed: {e}")
-        print(traceback.format_exc())
-        raise HTTPException(
-            status_code=500,
-            detail=f"Chat processing failed: {str(e)}"
-        )
-    finally:
-            # Close database session
-            try:
-                db.close()
-            except:
-                pass
+                "user_message": {
+                    "role": "user",
+                    "content": transcribed_text,
+                    "conversation_id": str(chat_response.conversation_id),
+                },
+                "chat_response": chat_response.dict(),
+            }
+        
+        except Exception as e:
+            print(f"❌ Chat processing failed: {e}")
+            print(traceback.format_exc())
+            raise HTTPException(
+                status_code=500,
+                detail=f"Chat processing failed: {str(e)}"
+            )
 
 
 class TextToSpeechRequest(BaseModel):
@@ -268,8 +266,10 @@ ELEVENLABS_OUTPUT_FORMATS = {
 }
 
 @router.post("/text-to-speech")
+@rate_limit("20/minute")
 async def text_to_speech(
-    request: TextToSpeechRequest,
+    request: Request,
+    body: TextToSpeechRequest,
     format: Literal["mp3", "opus"] = Query(
         default="mp3",
         description="Audio format for the output (mp3 or opus)",
@@ -302,24 +302,19 @@ async def text_to_speech(
     if api_key:
         api_key = api_key.strip()
     if not api_key:
-        raise HTTPException(
-            status_code=500,
+        raise InternalServerError(
             detail="ElevenLabs API key not configured. Set ELEVENLABS_API_KEY or XI_API_KEY in .env (in project root).",
         )
 
     if format not in ELEVENLABS_OUTPUT_FORMATS:
-        raise HTTPException(
-            status_code=400,
+        raise BadRequestError(
             detail=f"Unsupported format. Use one of: {list(ELEVENLABS_OUTPUT_FORMATS.keys())}",
         )
 
-    if len(request.text) > 5000:
-        raise HTTPException(
-            status_code=400,
-            detail="Text length exceeds maximum of 5000 characters",
-        )
+    if len(body.text) > 5000:
+        raise BadRequestError(detail="Text length exceeds maximum of 5000 characters")
 
-    print(f"🔊 Converting text to speech (ElevenLabs): {len(request.text)} chars, format={format}")
+    print(f"🔊 Converting text to speech (ElevenLabs): {len(body.text)} chars, format={format}")
 
     url = f"{ELEVENLABS_API_BASE}/text-to-speech/{ELEVENLABS_VOICE_ID}"
     headers = {
@@ -328,7 +323,7 @@ async def text_to_speech(
         "Accept": "audio/mpeg" if format == "mp3" else "audio/opus",
     }
     payload = {
-        "text": request.text,
+        "text": body.text,
         "model_id": "eleven_multilingual_v2",
         "output_format": ELEVENLABS_OUTPUT_FORMATS[format],
     }
@@ -359,15 +354,11 @@ async def text_to_speech(
         status = e.response.status_code if e.response is not None else 500
         body = (e.response.text or str(e)) if e.response is not None else str(e)
         print(f"❌ TTS failed (HTTP {status}): {body}")
-        raise HTTPException(
-            status_code=status,
-            detail=f"Text-to-speech failed: {body[:500]}",
-        )
+        if status >= 500:
+            raise ServiceUnavailableError(detail=f"Text-to-speech failed: {body[:500]}")
+        raise BadRequestError(detail=f"Text-to-speech failed: {body[:500]}")
     except Exception as e:
         print(f"❌ TTS failed: {e}")
         print(traceback.format_exc())
-        raise HTTPException(
-            status_code=500,
-            detail=f"Text-to-speech conversion failed: {str(e)}",
-        )
+        raise InternalServerError(detail=f"Text-to-speech conversion failed: {str(e)}")
 

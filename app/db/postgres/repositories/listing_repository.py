@@ -2,10 +2,11 @@
 Repository for property listing database operations.
 Handles fetching listings with all related data (property attributes, agents, media, etc.)
 """
-from contextlib import contextmanager
+import logging
+from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 
 
@@ -15,31 +16,31 @@ class ListingRepository:
     Handles complex queries with multiple joins for listing data.
     """
     
-    def __init__(self, session: Session):
+    def __init__(self, session: AsyncSession):
         """
         Initialize repository with database session.
         
         Args:
-            session: SQLAlchemy database session
+            session: Async SQLAlchemy database session
         """
         self.session = session
     
-    @contextmanager
-    def _handle_errors(self):
+    @asynccontextmanager
+    async def _handle_errors(self):
         """
-        Context manager for automatic error handling and rollback.
+        Async context manager for automatic error handling and rollback.
         
         Usage:
-            with self._handle_errors():
+            async with self._handle_errors():
                 # database operations
         """
         try:
             yield
         except SQLAlchemyError as e:
-            self.session.rollback()
+            await self.session.rollback()
             raise e
     
-    def _execute_query(
+    async def _execute_query(
         self,
         query_str: str,
         params: Optional[Dict[str, Any]] = None
@@ -54,18 +55,16 @@ class ListingRepository:
         Returns:
             List of row dictionaries
         """
-        with self._handle_errors():
-            result = self.session.execute(text(query_str), params or {})
+        async with self._handle_errors():
+            result = await self.session.execute(text(query_str), params or {})
             rows = result.fetchall()
-            # ✅ Explicitly end the read-only transaction to avoid "idle in transaction"
             try:
-                self.session.commit()
+                await self.session.commit()
             except Exception:
-                # If commit fails (e.g. connection already closed), let caller handle it
                 pass
             return [dict(row._mapping) for row in rows]
     
-    def _execute_query_one(
+    async def _execute_query_one(
         self,
         query_str: str,
         params: Optional[Dict[str, Any]] = None
@@ -80,17 +79,16 @@ class ListingRepository:
         Returns:
             Row dictionary or None if no result
         """
-        with self._handle_errors():
-            result = self.session.execute(text(query_str), params or {})
+        async with self._handle_errors():
+            result = await self.session.execute(text(query_str), params or {})
             row = result.fetchone()
-            # ✅ Explicitly end the read-only transaction to avoid "idle in transaction"
             try:
-                self.session.commit()
+                await self.session.commit()
             except Exception:
                 pass
             return dict(row._mapping) if row else None
     
-    def fetch_listings(
+    async def fetch_listings(
         self,
         listing_ids: Optional[List[str]] = None,
         listing_status: str = "active",
@@ -109,7 +107,6 @@ class ListingRepository:
         Returns:
             List of formatted listing dictionaries ready for chunking
         """
-        # Build the comprehensive query matching the schema mapping
         query = """
         SELECT 
             -- Listing fields
@@ -172,7 +169,6 @@ class ListingRepository:
         
         params = {}
         
-        # Apply filters
         if listing_ids:
             query += " AND l.id = ANY(:listing_ids)"
             params['listing_ids'] = listing_ids
@@ -189,32 +185,23 @@ class ListingRepository:
             query += " AND l.id != ALL(:exclude_listing_ids)"
             params['exclude_listing_ids'] = exclude_listing_ids
         
-        # Add ordering
         query += " ORDER BY l.published_at DESC"
         
-        # Add limit
         if limit:
             query += " LIMIT :limit"
             params['limit'] = limit
         
-        # Execute query
-        rows = self._execute_query(query, params)
+        rows = await self._execute_query(query, params)
         
         listings = []
         for row_dict in rows:
-            # NOTE: For now we only use core listing + joined property/location fields.
-            # Related collections (amenities, inspections, agents, bids, sales history,
-            # offers, media) are not fetched here to avoid schema mismatches.
-            # The formatter will handle missing optional fields gracefully.
-            
-            # Format listing for chunking (lazy import to avoid circular dependency)
             from app.helpers.ingestion_pipeline.property.formatters import format_listing_for_chunking
             formatted_listing = format_listing_for_chunking(row_dict)
             listings.append(formatted_listing)
         
         return listings
     
-    def _fetch_amenities(self, property_id: str) -> List[Dict[str, Any]]:
+    async def _fetch_amenities(self, property_id: str) -> List[Dict[str, Any]]:
         """
         Fetch amenities for a property.
         
@@ -230,9 +217,9 @@ class ListingRepository:
             JOIN amenities a ON pa.amenity_id = a.id
             WHERE pa.property_id = :property_id
         """
-        return self._execute_query(query, {"property_id": property_id})
+        return await self._execute_query(query, {"property_id": property_id})
     
-    def _fetch_inspections(self, listing_id: str) -> List[Dict[str, Any]]:
+    async def _fetch_inspections(self, listing_id: str) -> List[Dict[str, Any]]:
         """
         Fetch inspection times for a listing.
         
@@ -242,20 +229,23 @@ class ListingRepository:
         Returns:
             List of inspection dictionaries
         """
+        # listing_inspections: id, listing_id, inspection_start_time, inspection_end_time,
+        # inspection_type, is_active, created_at, updated_at, total_inspection_count
         query = """
             SELECT 
                 id,
-                inspection_date as "inspectionDate",
+                inspection_type as "inspectionType",
+                (inspection_start_time::date)::text as "inspectionDate",
                 inspection_start_time as "inspectionStartTime",
                 inspection_end_time as "inspectionEndTime",
-                is_cancelled as "isCancelled"
+                (NOT is_active) as "isCancelled"
             FROM listing_inspections
             WHERE listing_id = :listing_id
-            ORDER BY inspection_date ASC
+            ORDER BY inspection_start_time ASC
         """
-        return self._execute_query(query, {"listing_id": listing_id})
+        return await self._execute_query(query, {"listing_id": listing_id})
     
-    def _fetch_agents(self, listing_id: str) -> List[Dict[str, Any]]:
+    async def _fetch_agents(self, listing_id: str) -> List[Dict[str, Any]]:
         """
         Fetch agents for a listing.
         
@@ -277,9 +267,9 @@ class ListingRepository:
             JOIN users u ON pa.user_id = u.id
             WHERE pa.listing_id = :listing_id
         """
-        return self._execute_query(query, {"listing_id": listing_id})
+        return await self._execute_query(query, {"listing_id": listing_id})
     
-    def _fetch_highest_bid(self, listing_id: str) -> Optional[Dict[str, Any]]:
+    async def _fetch_highest_bid(self, listing_id: str) -> Optional[Dict[str, Any]]:
         """
         Fetch highest bid for an auction listing.
         
@@ -301,9 +291,9 @@ class ListingRepository:
             ORDER BY ab.bid_amount DESC
             LIMIT 1
         """
-        return self._execute_query_one(query, {"listing_id": listing_id})
+        return await self._execute_query_one(query, {"listing_id": listing_id})
     
-    def _fetch_sales_history(self, property_id: str) -> List[Dict[str, Any]]:
+    async def _fetch_sales_history(self, property_id: str) -> List[Dict[str, Any]]:
         """
         Fetch sales history for a property.
         
@@ -323,9 +313,9 @@ class ListingRepository:
             WHERE property_id = :property_id
             ORDER BY sale_date DESC
         """
-        return self._execute_query(query, {"property_id": property_id})
+        return await self._execute_query(query, {"property_id": property_id})
     
-    def _fetch_offers(self, listing_id: str) -> List[Dict[str, Any]]:
+    async def _fetch_offers(self, listing_id: str) -> List[Dict[str, Any]]:
         """
         Fetch offers for a listing.
         
@@ -345,9 +335,9 @@ class ListingRepository:
             WHERE listing_id = :listing_id
             ORDER BY created_at DESC
         """
-        return self._execute_query(query, {"listing_id": listing_id})
+        return await self._execute_query(query, {"listing_id": listing_id})
     
-    def _fetch_media(self, property_id: str) -> List[Dict[str, Any]]:
+    async def _fetch_media(self, property_id: str) -> List[Dict[str, Any]]:
         """
         Fetch media for a property.
         
@@ -368,9 +358,9 @@ class ListingRepository:
             WHERE pm.property_id = :property_id
             ORDER BY mm.display_order ASC
         """
-        return self._execute_query(query, {"property_id": property_id})
+        return await self._execute_query(query, {"property_id": property_id})
     
-    def get_listing_hero_image(self, listing_id: str) -> Optional[str]:
+    async def get_listing_hero_image(self, listing_id: str) -> Optional[str]:
         """
         Get the hero image URL (first image by display order) for a listing.
         
@@ -391,10 +381,10 @@ class ListingRepository:
             ORDER BY pm.display_order ASC
             LIMIT 1
         """
-        result = self._execute_query_one(query, {"listing_id": listing_id})
+        result = await self._execute_query_one(query, {"listing_id": listing_id})
         return result.get("fileUrl") if result else None
     
-    def get_multiple_listing_hero_images(self, listing_ids: List[str]) -> Dict[str, str]:
+    async def get_multiple_listing_hero_images(self, listing_ids: List[str]) -> Dict[str, str]:
         """
         Get hero image URLs for multiple listings at once.
         
@@ -424,10 +414,10 @@ class ListingRepository:
             FROM RankedImages
             WHERE rn = 1
         """
-        results = self._execute_query(query, {"listing_ids": listing_ids})
+        results = await self._execute_query(query, {"listing_ids": listing_ids})
         return {row["listing_id"]: row["fileUrl"] for row in results}
     
-    def get_multiple_listing_property_media(self, listing_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    async def get_multiple_listing_property_media(self, listing_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
         """
         Get full property media arrays for multiple listings at once.
         
@@ -458,20 +448,19 @@ class ListingRepository:
             AND mm.file_type IN ('jpg', 'jpeg', 'png', 'webp')
             ORDER BY l.id, pm.display_order ASC
         """
-        results = self._execute_query(query, {"listing_ids": listing_ids})
+        results = await self._execute_query(query, {"listing_ids": listing_ids})
         
-        # Group by listing_id (convert to string for consistency)
         media_by_listing = {}
         for row in results:
-            listing_id = str(row["listing_id"])  # Convert UUID to string
+            listing_id = str(row["listing_id"])
             if listing_id not in media_by_listing:
                 media_by_listing[listing_id] = []
             
             media_by_listing[listing_id].append({
-                "id": str(row["pm_id"]),  # Convert UUID to string
+                "id": str(row["pm_id"]),
                 "displayOrder": row["displayOrder"],
                 "mediaMetadata": {
-                    "id": str(row["mm_id"]),  # Convert UUID to string
+                    "id": str(row["mm_id"]),
                     "fileName": row["fileName"],
                     "fileType": row["fileType"],
                     "fileUrl": row["fileUrl"],
@@ -481,16 +470,19 @@ class ListingRepository:
         
         return media_by_listing
     
-    def get_listing_location(self, listing_id: str) -> Optional[Dict[str, Any]]:
+    async def get_listing_location(self, listing_id: str) -> Optional[Dict[str, Any]]:
         """
         Get location data (latitude, longitude, address, suburb) for a listing.
+        Tries: (1) via property (listings -> properties -> locations),
+        then (2) via listing's location_id if present (listings -> locations).
         
         Args:
-            listing_id: The listing ID
+            listing_id: The listing ID (UUID string)
             
         Returns:
             Dictionary with location data or None if not found
         """
+        # Path 1: listings -> properties -> locations (standard schema)
         query = """
             SELECT 
                 loc.latitude,
@@ -500,21 +492,88 @@ class ListingRepository:
             FROM listings l
             LEFT JOIN properties p ON l.property_id = p.id
             LEFT JOIN locations loc ON p.location_id = loc.id
-            WHERE l.id = :listing_id
+            WHERE l.id::text = :listing_id
         """
+        row_dict = await self._execute_query_one(query, {'listing_id': str(listing_id)})
         
-        row_dict = self._execute_query_one(query, {'listing_id': listing_id})
-        
-        if row_dict:
+        # Path 2: if no row or null lat/lon, try listing -> location directly (some schemas)
+        if (not row_dict or row_dict.get('latitude') is None or row_dict.get('longitude') is None):
+            try:
+                fallback_row = await self._execute_query_one(
+                    """
+                    SELECT loc.latitude, loc.longitude, loc.display_address as "displayAddress", loc.suburb
+                    FROM listings l
+                    LEFT JOIN locations loc ON l.location_id = loc.id
+                    WHERE l.id::text = :listing_id
+                    """,
+                    {'listing_id': str(listing_id)}
+                )
+                if fallback_row and fallback_row.get('latitude') is not None and fallback_row.get('longitude') is not None:
+                    row_dict = fallback_row
+            except Exception:
+                pass
+
+        # Path 3: some schemas store latitude/longitude directly on listings
+        if (not row_dict or row_dict.get('latitude') is None or row_dict.get('longitude') is None):
+            try:
+                direct_row = await self._execute_query_one(
+                    """
+                    SELECT latitude, longitude, display_address as "displayAddress", suburb
+                    FROM listings WHERE id::text = :listing_id
+                    """,
+                    {'listing_id': str(listing_id)}
+                )
+                if direct_row and direct_row.get('latitude') is not None and direct_row.get('longitude') is not None:
+                    row_dict = direct_row
+            except Exception:
+                pass
+
+        # Path 4: listings table may use lat/lng or lat/lon column names
+        if (not row_dict or row_dict.get('latitude') is None or row_dict.get('longitude') is None):
+            try:
+                alt_row = await self._execute_query_one(
+                    """
+                    SELECT lat as latitude, lng as longitude FROM listings WHERE id::text = :listing_id
+                    """,
+                    {'listing_id': str(listing_id)}
+                )
+                if alt_row and alt_row.get('latitude') is not None and alt_row.get('longitude') is not None:
+                    row_dict = alt_row
+            except Exception:
+                try:
+                    alt_row = await self._execute_query_one(
+                        """
+                        SELECT lat as latitude, lon as longitude FROM listings WHERE id::text = :listing_id
+                        """,
+                        {'listing_id': str(listing_id)}
+                    )
+                    if alt_row and alt_row.get('latitude') is not None and alt_row.get('longitude') is not None:
+                        row_dict = alt_row
+                except Exception:
+                    pass
+
+        if row_dict and (row_dict.get('latitude') is not None and row_dict.get('longitude') is not None):
+            lat, lon = row_dict.get('latitude'), row_dict.get('longitude')
+            try:
+                lat, lon = float(lat), float(lon)
+            except (TypeError, ValueError):
+                pass
             return {
-                'latitude': row_dict.get('latitude'),
-                'longitude': row_dict.get('longitude'),
+                'latitude': lat,
+                'longitude': lon,
                 'displayAddress': row_dict.get('displayAddress'),
                 'suburb': row_dict.get('suburb')
             }
+
+        logger = logging.getLogger(__name__)
+        logger.debug(
+            "get_listing_location: no lat/lon for listing_id=%s (path1 row=%s)",
+            listing_id,
+            bool(row_dict),
+        )
         return None
     
-    def find_nearby_listings(
+    async def find_nearby_listings(
         self,
         latitude: float,
         longitude: float,
@@ -524,8 +583,6 @@ class ListingRepository:
     ) -> List[Dict[str, Any]]:
         """
         Find nearby listings within a distance threshold.
-        Note: This calculates distance in Python using Haversine formula.
-        For better performance with large datasets, consider using PostGIS.
         
         Args:
             latitude: Center point latitude
@@ -539,7 +596,6 @@ class ListingRepository:
         """
         from app.services.rag_pipeline.location_utils import haversine_distance
         
-        # Build query as string first, then convert to text()
         query_str = """
             SELECT DISTINCT 
                 l.id,
@@ -568,9 +624,8 @@ class ListingRepository:
             query_str += " AND l.id::text != :exclude_listing_id"
             params['exclude_listing_id'] = str(exclude_listing_id)
         
-        rows = self._execute_query(query_str, params)
+        rows = await self._execute_query(query_str, params)
         
-        # Calculate distances and filter
         nearby_listings = []
         for row_dict in rows:
             if row_dict.get('latitude') and row_dict.get('longitude'):
@@ -583,11 +638,10 @@ class ListingRepository:
                     row_dict['distance_km'] = round(distance, 2)
                     nearby_listings.append(row_dict)
         
-        # Sort by distance and limit
         nearby_listings.sort(key=lambda x: x['distance_km'])
         return nearby_listings[:limit]
     
-    def find_same_suburb_listings(
+    async def find_same_suburb_listings(
         self,
         suburb: str,
         exclude_listing_id: Optional[str] = None,
@@ -604,7 +658,6 @@ class ListingRepository:
         Returns:
             List of listing dictionaries
         """
-        # Build query as string first, then convert to text()
         query_str = """
             SELECT DISTINCT 
                 l.id,
@@ -636,38 +689,20 @@ class ListingRepository:
             query_str += " LIMIT :limit"
             params['limit'] = limit
         
-        return self._execute_query(query_str, params)
+        return await self._execute_query(query_str, params)
     
-    def fetch_property_documents(
+    async def fetch_property_documents(
         self,
         listing_id: str
     ) -> List[Dict[str, Any]]:
         """
         Fetch PUBLIC PDF documents for a listing from database.
         
-        This method retrieves property documents from the property_media table where:
-        - category is 'floor_plan' or 'other' (documents, not 'photo')
-        - is_public = true (only public documents)
-        - file_type = 'pdf' (only PDF files, not images)
-        
         Args:
             listing_id: Listing ID to fetch documents for
             
         Returns:
-            List of document dictionaries matching the propertyDocuments structure:
-            [
-                {
-                    "id": "uuid",
-                    "displayOrder": 1,
-                    "mediaMetadata": {
-                        "id": "uuid",
-                        "fileName": "floor_plan.pdf",
-                        "fileUrl": "https://...",
-                        "fileType": "pdf",
-                        "altText": "Property floor plan"
-                    }
-                }
-            ]
+            List of document dictionaries matching the propertyDocuments structure
         """
         query_str = """
             SELECT 
@@ -690,9 +725,8 @@ class ListingRepository:
             ORDER BY pm.display_order
         """
         
-        rows = self._execute_query(query_str, {'listing_id': listing_id})
+        rows = await self._execute_query(query_str, {'listing_id': listing_id})
         
-        # Format to match propertyDocuments structure
         documents = []
         for row_dict in rows:
             documents.append({
@@ -708,4 +742,3 @@ class ListingRepository:
             })
         
         return documents
-

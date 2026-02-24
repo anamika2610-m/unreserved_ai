@@ -246,15 +246,15 @@ def is_amenity_query(query: str) -> bool:
     """
     query_lower = query.lower()
     
-    # Exclude real estate market queries (market trends, market data, market analysis, etc.)
+    # Exclude real estate market queries (market trends, price trends, market data, etc.)
     # These are about property market data, not shopping markets/amenities
     market_data_terms = [
-        'market trend', 'market trends', 'market data', 'market analysis',
-        'market insight', 'market insights', 'market condition', 'market conditions',
-        'market value', 'market values', 'market price', 'market prices',
-        'real estate market', 'property market', 'housing market',
-        'market report', 'market reports', 'market forecast', 'market forecasts',
-        'market outlook', 'market performance', 'market statistics'
+        'market trend', 'market trends', 'price trend', 'price trends',
+        'market data', 'market analysis', 'market insight', 'market insights',
+        'market condition', 'market conditions', 'market value', 'market values',
+        'market price', 'market prices', 'real estate market', 'property market',
+        'housing market', 'market report', 'market reports', 'market forecast',
+        'market forecasts', 'market outlook', 'market performance', 'market statistics'
     ]
     
     # If query is about real estate market data, it's NOT an amenity query
@@ -421,15 +421,14 @@ def detect_amenity_query(query: str) -> List[str]:
     """
     query_lower = query.lower()
     
-    # Exclude real estate market queries (market trends, market data, etc.)
-    # These are about property market data, not shopping markets/amenities
+    # Exclude real estate market queries (market trends, price trends, market data, etc.)
     market_data_terms = [
-        'market trend', 'market trends', 'market data', 'market analysis',
-        'market insight', 'market insights', 'market condition', 'market conditions',
-        'market value', 'market values', 'market price', 'market prices',
-        'real estate market', 'property market', 'housing market',
-        'market report', 'market reports', 'market forecast', 'market forecasts',
-        'market outlook', 'market performance', 'market statistics'
+        'market trend', 'market trends', 'price trend', 'price trends',
+        'market data', 'market analysis', 'market insight', 'market insights',
+        'market condition', 'market conditions', 'market value', 'market values',
+        'market price', 'market prices', 'real estate market', 'property market',
+        'housing market', 'market report', 'market reports', 'market forecast',
+        'market forecasts', 'market outlook', 'market performance', 'market statistics'
     ]
     
     # If query is about real estate market data, return empty list

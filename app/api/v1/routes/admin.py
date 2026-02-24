@@ -6,16 +6,19 @@ Includes property-level chat summaries and other administrative features.
 # Import config to ensure environment variables are set
 import app.config  # noqa: F401
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends, Request
+
+from app.core.exceptions import InternalServerError
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import desc
-from sqlalchemy.orm import Session
+from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import get_db
+from app.core.rate_limiter import rate_limit
+from app.db.connection import get_db
 from app.db.postgres.repositories.conversation_repository import ConversationRepository
 from app.db.models.cron_job_run import CronJobRun
 
@@ -50,7 +53,7 @@ class PropertySummaryResponse(BaseModel):
 )
 async def get_property_chat_summary(
     listing_id: UUID,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> PropertySummaryResponse:
     """
     Get a property-level chat summary for administrators.
@@ -91,20 +94,17 @@ async def get_property_chat_summary(
         summary_service = ChatSummaryService()
         
         # Check if summary exists in database
-        existing_summary = summary_repo.get_by_listing_id(listing_id)
+        existing_summary = await summary_repo.get_by_listing_id(listing_id)
         if existing_summary and existing_summary.summary:
-            # Return existing summary from database
-            # Note: We still need to generate analysis for the response
-            user_messages = conversation_repo.get_listing_user_messages(
+            user_messages = await conversation_repo.get_listing_user_messages(
                 listing_id=listing_id,
                 limit_per_conversation=50,
             )
             analysis = summary_service.analyze_conversations(user_messages)
             
-            # Get property title
             property_title = None
             try:
-                listing = listing_repo.get_by_id(listing_id)
+                listing = await listing_repo.get_by_id(listing_id)
                 if listing:
                     property_title = getattr(listing, 'slug', None) or str(listing_id)
             except:
@@ -121,35 +121,28 @@ async def get_property_chat_summary(
             )
         
         # Generate new summary if not in database
-        # Get property title (optional, for context)
         property_title = None
         try:
-            listing = listing_repo.get_by_id(listing_id)
+            listing = await listing_repo.get_by_id(listing_id)
             if listing:
-                # Try to get property title from listing or property data
-                # This depends on your listing model structure
                 property_title = getattr(listing, 'slug', None) or str(listing_id)
         except:
             pass
         
-        # Get all user messages for this listing
-        user_messages = conversation_repo.get_listing_user_messages(
+        user_messages = await conversation_repo.get_listing_user_messages(
             listing_id=listing_id,
-            limit_per_conversation=50,  # Limit to prevent excessive data
+            limit_per_conversation=50,
         )
         
-        # Analyze conversations
         analysis = summary_service.analyze_conversations(user_messages)
         
-        # Generate summary using LLM
         summary = summary_service.generate_summary(
             listing_id=str(listing_id),
             analysis=analysis,
             property_title=property_title,
         )
         
-        # Save to database
-        summary_repo.create_or_update(
+        await summary_repo.create_or_update(
             listing_id=listing_id,
             summary=summary,
             analysis=analysis,
@@ -171,10 +164,7 @@ async def get_property_chat_summary(
         print(f"❌ Error generating property summary: {type(e).__name__}: {str(e)}")
         print(f"Full traceback:\n{error_details}")
         
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error generating property chat summary: {str(e)}",
-        )
+        raise InternalServerError(detail=f"Error generating property chat summary: {str(e)}")
 
 
 # ------------------------------------------------------------------------------
@@ -199,10 +189,12 @@ class SummaryJobResponse(BaseModel):
     "/summaries/generate",
     response_model=SummaryJobResponse,
 )
+@rate_limit("10/minute")
 async def trigger_summary_generation(
+    request: Request,
     days_required: int = 7,
     max_listings: Optional[int] = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> SummaryJobResponse:
     """
     Trigger summary generation for listings that need summaries.
@@ -234,12 +226,11 @@ async def trigger_summary_generation(
         from app.services.summary_cron_service import SummaryCronService
 
         cron_service = SummaryCronService()
-        results = cron_service.run_nightly_summary_job(
+        results = await cron_service.run_nightly_summary_job(
             days_required=days_required,
             max_listings=max_listings
         )
 
-        # Record successful run for real-time cron status
         run = CronJobRun(
             job_name="chat_summary",
             ran_at=datetime.now(timezone.utc),
@@ -247,7 +238,7 @@ async def trigger_summary_generation(
             message=None,
         )
         db.add(run)
-        db.commit()
+        await db.commit()
 
         return SummaryJobResponse(**results)
 
@@ -257,7 +248,6 @@ async def trigger_summary_generation(
         print(f"❌ Error in summary generation job: {type(e).__name__}: {str(e)}")
         print(f"Full traceback:\n{error_details}")
 
-        # Record failed run for real-time cron status
         try:
             run = CronJobRun(
                 job_name="chat_summary",
@@ -266,14 +256,11 @@ async def trigger_summary_generation(
                 message=str(e)[:500],
             )
             db.add(run)
-            db.commit()
+            await db.commit()
         except Exception:
             pass
 
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error running summary generation job: {str(e)}",
-        )
+        raise InternalServerError(detail=f"Error running summary generation job: {str(e)}")
 
 
 # ------------------------------------------------------------------------------
@@ -290,15 +277,16 @@ class CronStatusResponse(BaseModel):
     last_run_status: Optional[str] = Field(None, description="Last run HTTP status or outcome")
 
 
-def _get_last_cron_run(db: Session, job_name: str = "chat_summary") -> tuple[Optional[str], Optional[str]]:
+async def _get_last_cron_run(db: AsyncSession, job_name: str = "chat_summary") -> tuple[Optional[str], Optional[str]]:
     """Read last run from database. Returns (last_run_at_iso, last_run_status)."""
-    row = (
-        db.query(CronJobRun)
-        .filter(CronJobRun.job_name == job_name)
+    query = (
+        select(CronJobRun)
+        .where(CronJobRun.job_name == job_name)
         .order_by(desc(CronJobRun.ran_at))
         .limit(1)
-        .first()
     )
+    result = await db.execute(query)
+    row = result.scalar_one_or_none()
     if not row:
         return None, None
     ran_at_iso = row.ran_at.isoformat() if row.ran_at.tzinfo else row.ran_at.replace(tzinfo=timezone.utc).isoformat()
@@ -326,7 +314,7 @@ class CronLastRunRequest(BaseModel):
     "/cron/last-run",
     response_model=Dict[str, str],
 )
-async def register_cron_last_run(body: CronLastRunRequest, db: Session = Depends(get_db)) -> Dict[str, str]:
+async def register_cron_last_run(body: CronLastRunRequest, db: AsyncSession = Depends(get_db)) -> Dict[str, str]:
     """
     **Report** when the cron job last ran (called by external cron script after each run).
 
@@ -345,7 +333,7 @@ async def register_cron_last_run(body: CronLastRunRequest, db: Session = Depends
         message=None,
     )
     db.add(run)
-    db.commit()
+    await db.commit()
     return {"status": "ok", "last_run_at": body.last_run_at}
 
 
@@ -353,7 +341,7 @@ async def register_cron_last_run(body: CronLastRunRequest, db: Session = Depends
     "/cron/status",
     response_model=CronStatusResponse,
 )
-async def get_cron_status(db: Session = Depends(get_db)) -> CronStatusResponse:
+async def get_cron_status(db: AsyncSession = Depends(get_db)) -> CronStatusResponse:
     """
     Real-time cron status: when the chat summary job last ran and its outcome.
     Last run is recorded in the database when:
@@ -362,7 +350,7 @@ async def get_cron_status(db: Session = Depends(get_db)) -> CronStatusResponse:
 
     **Schedule:** Daily at 11:20 AM (crontab: 20 11 * * *)
     """
-    last_run_at, last_run_status = _get_last_cron_run(db, job_name="chat_summary")
+    last_run_at, last_run_status = await _get_last_cron_run(db, job_name="chat_summary")
 
     return CronStatusResponse(
         job_name="chat_summary",

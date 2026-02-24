@@ -4,14 +4,16 @@ Checks database connectivity, LLM API, vector stores, embedding service, and int
 """
 from typing import Dict, Any
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from contextlib import asynccontextmanager
+from fastapi import APIRouter
+
+from app.core.exceptions import ServiceUnavailableError
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
-from contextlib import contextmanager
 import httpx
 
-from app.db.session import engine, SessionLocal
+from app.db.connection import get_async_engine, get_session_maker, check_db_connection
 from app.services.rag_pipeline.llms import get_llm_client, get_model_name
 from app.helpers.ingestion_pipeline.shared.openai_embeddings import OpenAIEmbeddings
 
@@ -49,19 +51,20 @@ class HealthCheckResponse(BaseModel):
 # ------------------------------------------------------------------------------
 # Helper Functions
 # ------------------------------------------------------------------------------
-@contextmanager
-def get_db_session():
-    """Context manager for database sessions in health checks."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+@asynccontextmanager
+async def get_db_session():
+    """Async context manager for database sessions in health checks."""
+    session_maker = get_session_maker()
+    async with session_maker() as db:
+        try:
+            yield db
+        finally:
+            await db.close()
 
 
-def _check_table_exists(db, table_name: str) -> bool:
+async def _check_table_exists(db, table_name: str) -> bool:
     """Helper to check if a table exists in the database."""
-    result = db.execute(text("""
+    result = await db.execute(text("""
         SELECT EXISTS(
             SELECT 1 FROM information_schema.tables 
             WHERE table_name = :table_name
@@ -70,27 +73,26 @@ def _check_table_exists(db, table_name: str) -> bool:
     return result.scalar() or False
 
 
-def _get_table_count(db, table_name: str) -> int:
+async def _get_table_count(db, table_name: str) -> int:
     """
     Helper to get row count for a table.
     Note: table_name is validated by _check_table_exists first, so it's safe.
-    Using identifier quoting for safety.
     """
-    result = db.execute(text(f'SELECT COUNT(*) FROM "{table_name}"'))
+    result = await db.execute(text(f'SELECT COUNT(*) FROM "{table_name}"'))
     return result.scalar() or 0
 
 
 # ------------------------------------------------------------------------------
 # Health Check Functions
 # ------------------------------------------------------------------------------
-def check_google() -> Dict[str, Any]:
+async def check_google() -> Dict[str, Any]:
     """
     Pings Google to check internet connectivity.
     Returns a dict with status and optional error message.
     """
     try:
-        with httpx.Client(timeout=GOOGLE_CHECK_TIMEOUT) as client:
-            response = client.get("https://www.google.com", follow_redirects=True)
+        async with httpx.AsyncClient(timeout=GOOGLE_CHECK_TIMEOUT) as client:
+            response = await client.get("https://www.google.com", follow_redirects=True)
             if response.status_code == 200:
                 return {"status": "ok", "message": "Google is reachable"}
             else:
@@ -99,25 +101,24 @@ def check_google() -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-def check_database() -> Dict[str, Any]:
+async def check_database() -> Dict[str, Any]:
     """
     Checks PostgreSQL database connectivity.
     Returns a dict with status and optional error message.
     """
     try:
-        with engine.connect() as conn:
-            # Test basic connection
-            result = conn.execute(text("SELECT 1"))
+        async with get_async_engine().connect() as conn:
+            result = await conn.execute(text("SELECT 1"))
             result.scalar()
             
-            # Check if pgvector extension is installed
-            pgvector_check = conn.execute(text("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector')"))
+            pgvector_check = await conn.execute(text("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector')"))
             pgvector_installed = pgvector_check.scalar()
             
             return {
                 "status": "ok",
                 "message": "Database is reachable",
-                "pgvector_installed": pgvector_installed
+                "pgvector_installed": pgvector_installed,
+                "basic_connection_ok": await check_db_connection(),
             }
     except OperationalError as e:
         return {"status": "error", "message": f"Database connection failed: {str(e)}"}
@@ -125,7 +126,7 @@ def check_database() -> Dict[str, Any]:
         return {"status": "error", "message": f"Database check failed: {str(e)}"}
 
 
-def check_llm_api() -> Dict[str, Any]:
+async def check_llm_api() -> Dict[str, Any]:
     """
     Checks OpenAI LLM API availability.
     Returns a dict with status and optional error message.
@@ -134,7 +135,6 @@ def check_llm_api() -> Dict[str, Any]:
         llm_client = get_llm_client()
         model_name = get_model_name()
         
-        # Test with a minimal API call
         response = llm_client.chat.completions.create(
             model=model_name,
             messages=[{"role": "user", "content": "test"}],
@@ -155,27 +155,23 @@ def check_llm_api() -> Dict[str, Any]:
         }
 
 
-def check_vector_store() -> Dict[str, Any]:
+async def check_vector_store() -> Dict[str, Any]:
     """
     Checks vector store accessibility (property_embeddings and generic_knowledge tables).
     Returns a dict with status and optional error message.
     """
     try:
-        with get_db_session() as db:
-            # Check property_embeddings table
-            property_table_exists = _check_table_exists(db, "property_embeddings")
-            property_count = _get_table_count(db, "property_embeddings") if property_table_exists else 0
+        async with get_db_session() as db:
+            property_table_exists = await _check_table_exists(db, "property_embeddings")
+            property_count = await _get_table_count(db, "property_embeddings") if property_table_exists else 0
             
-            # Check generic_knowledge table
-            generic_table_exists = _check_table_exists(db, "generic_knowledge")
-            generic_count = _get_table_count(db, "generic_knowledge") if generic_table_exists else 0
+            generic_table_exists = await _check_table_exists(db, "generic_knowledge")
+            generic_count = await _get_table_count(db, "generic_knowledge") if generic_table_exists else 0
             
-            # Test a simple vector query if tables exist
             vector_query_works = False
             if property_table_exists and property_count > 0:
                 try:
-                    # Try a simple query to verify table is accessible
-                    db.execute(text("""
+                    await db.execute(text("""
                         SELECT COUNT(*) FROM property_embeddings 
                         WHERE listing_id IS NOT NULL 
                         LIMIT 1
@@ -204,7 +200,7 @@ def check_vector_store() -> Dict[str, Any]:
         }
 
 
-def check_embedding_service() -> Dict[str, Any]:
+async def check_embedding_service() -> Dict[str, Any]:
     """
     Checks OpenAI embedding service availability.
     Returns a dict with status and optional error message.
@@ -212,7 +208,6 @@ def check_embedding_service() -> Dict[str, Any]:
     try:
         embedding_client = OpenAIEmbeddings()
         
-        # Test embedding generation with a simple string
         test_text = "health check test"
         embeddings = embedding_client.encode([test_text], convert_to_numpy=False)
         
@@ -246,20 +241,17 @@ async def health_check() -> Dict[str, Any]:
         - 200 OK if all services are healthy
         - 503 Service Unavailable if any service is unhealthy
     """
-    # Run all health checks
-    google_status = check_google()
-    database_status = check_database()
-    llm_status = check_llm_api()
-    vector_store_status = check_vector_store()
-    embedding_status = check_embedding_service()
+    google_status = await check_google()
+    database_status = await check_database()
+    llm_status = await check_llm_api()
+    vector_store_status = await check_vector_store()
+    embedding_status = await check_embedding_service()
     
-    # Determine overall status
     all_checks = [google_status, database_status, llm_status, vector_store_status, embedding_status]
     overall_status = "ok" if all(
         check["status"] == "ok" for check in all_checks
     ) else "error"
     
-    # Build response
     response = {
         "status": overall_status,
         "timestamp": datetime.utcnow().isoformat(),
@@ -272,9 +264,7 @@ async def health_check() -> Dict[str, Any]:
         }
     }
     
-    # Return 503 if any service is unhealthy
     if overall_status == "error":
-        raise HTTPException(status_code=503, detail=response)
+        raise ServiceUnavailableError(detail=response)
     
     return response
-

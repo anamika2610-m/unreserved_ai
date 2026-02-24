@@ -24,14 +24,12 @@ class ListingSummary(Base):
         default=uuid.uuid4,
     )
 
-    lisitng_id = Column(
+    listing_id = Column(
+        "listing_id",
         UUID(as_uuid=True),
-        # Note: Foreign key removed - listings table may not be in ORM
-        # Foreign key exists at database level
         nullable=False,
-        unique=True,  # One summary per listing
+        unique=True,
         index=True,
-        # Note: Column name has typo 'lisitng_id' in database, keeping it to match schema
     )
 
     summary = Column(
@@ -60,7 +58,7 @@ class ListingSummary(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("lisitng_id", name="uq_listing_summary_listing_id"),
+        UniqueConstraint("listing_id", name="uq_listing_summary_listing_id"),
         Index("idx_listing_summary_last_summarised_at", "last_summarised_at"),
         Index("idx_listing_summary_updated_at", "updated_at"),
     )

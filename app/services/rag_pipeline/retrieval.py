@@ -7,7 +7,7 @@ Now using pgvector (PostgreSQL native vector storage) instead of ChromaDB.
 import logging
 import re
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional, Tuple
 
 from app.helpers.ingestion_pipeline.property.pgvector_store import PgVectorStore
@@ -48,12 +48,19 @@ class PropertyRetriever:
         'land', 'floor', 'rooms'
     ]
     
+    # Queries that need property_document PDFs (trends, comparables, bushfire, etc.). Keep minimal; generation tries PDF as last resort.
     DOCUMENT_KEYWORDS = [
         'market insights', 'market insight', 'insights', 'insight',
         'information provided', 'details provided', 'what information',
         'what details', 'document', 'documents', 'statement', 'report',
         'disclosure', 'vendor statement', 'section 32', 'contract',
         'market', 'knowledge base', 'property knowledge', 'property information',
+        # Price/market trends and area context (often in property PDFs)
+        'price trend', 'price trends', 'market trend', 'market trends',
+        'trends for this area', 'price trends for', 'market trends for',
+        # Comparable sales / nearby sold properties → use property_document PDFs
+        'nearby properties sold', 'nearby sold', 'properties sold', 'recent sales',
+        'recent sale', 'comparable sales', 'comparable sale', 'comparable properties',
         # Property-specific environmental/planning queries (should search property_document PDFs)
         'bushfire', 'bushfire regulations', 'bushfire management', 'bushfire overlay',
         'flood', 'flooding', 'flood regulations', 'flood overlay', 'flood risk',
@@ -78,8 +85,8 @@ class PropertyRetriever:
         self.vector_store = vector_store or PgVectorStore()
         self._last_timings: Dict[str, float] = {}  # fine-grained timers from last retrieve call
     
-    @contextmanager
-    def _get_listing_repository(self):
+    @asynccontextmanager
+    async def _get_listing_repository(self):
         """
         Context manager for database session and listing repository.
         
@@ -87,19 +94,19 @@ class PropertyRetriever:
             ListingRepository instance
             
         Example:
-            with self._get_listing_repository() as listing_repo:
-                location_data = listing_repo.get_listing_location(listing_id)
+            async with self._get_listing_repository() as listing_repo:
+                location_data = await listing_repo.get_listing_location(listing_id)
         """
-        from app.db.session import SessionLocal
-        from app.db.postgres.repositories.listing_repository import ListingRepository
         
-        db = SessionLocal()
-        try:
-            yield ListingRepository(db)
-        finally:
-            db.close()
+        from app.db.postgres.repositories.listing_repository import ListingRepository
+        from app.db.connection import get_session_maker
+        async_session_maker = get_session_maker()
+        async with async_session_maker() as db:
+                yield ListingRepository(db)
+        
+        
     
-    def _get_location_from_database(self, listing_id: str) -> Optional[Tuple[float, float, str]]:
+    async def _get_location_from_database(self, listing_id: str) -> Optional[Tuple[float, float, str]]:   
         """
         Get location (lat, lon, address) from database via repository.
 
@@ -110,8 +117,8 @@ class PropertyRetriever:
             Tuple of (latitude, longitude, address) or None if not found
         """
         try:
-            with self._get_listing_repository() as listing_repo:
-                location_data = listing_repo.get_listing_location(listing_id)
+            async with self._get_listing_repository() as listing_repo:
+                location_data = await listing_repo.get_listing_location(listing_id)
                 
                 if location_data:
                     lat = location_data.get('latitude')
@@ -141,7 +148,7 @@ class PropertyRetriever:
         
         return None
     
-    def _get_suburb_from_database(self, listing_id: str) -> Optional[str]:
+    async def _get_suburb_from_database(self, listing_id: str) -> Optional[str]:
         """
         Get suburb from database via repository.
 
@@ -152,8 +159,8 @@ class PropertyRetriever:
             Suburb name or None if not found
         """
         try:
-            with self._get_listing_repository() as listing_repo:
-                location_data = listing_repo.get_listing_location(listing_id)
+            async with self._get_listing_repository() as listing_repo:
+                location_data = await listing_repo.get_listing_location(listing_id)
 
                 if location_data:
                     suburb = location_data.get('suburb')
@@ -213,7 +220,7 @@ class PropertyRetriever:
             },
         }
     
-    def _enrich_property_with_chunks(self, property_dict: Dict[str, Any]) -> None:
+    async def _enrich_property_with_chunks(self, property_dict: Dict[str, Any]) -> None:
         """
         Enrich a property dictionary with full listing data from chunks.
         Modifies the property_dict in place.
@@ -241,7 +248,7 @@ class PropertyRetriever:
         property_dict['metadata'] = enriched_metadata
         property_dict['content'] = ' | '.join(enriched_content_parts[:3])  # Limit to avoid too much
     
-    def _fetch_nearby_properties_from_database(
+    async def _fetch_nearby_properties_from_database(
         self,
         current_lat: float,
         current_lon: float,
@@ -263,8 +270,8 @@ class PropertyRetriever:
             List of property dictionaries in retrieval format
         """
         try:
-            with self._get_listing_repository() as listing_repo:
-                nearby_listings = listing_repo.find_nearby_listings(
+            async with self._get_listing_repository() as listing_repo:
+                nearby_listings = await listing_repo.find_nearby_listings(
                     latitude=current_lat,
                     longitude=current_lon,
                     max_distance_km=max_distance_km,
@@ -295,7 +302,7 @@ class PropertyRetriever:
             logger.exception("⚠️  Could not fetch nearby properties from database: %s", e)
             return []
     
-    def _fetch_same_suburb_properties_from_database(
+    async def _fetch_same_suburb_properties_from_database(
         self,
         current_suburb: str,
         listing_id: str,
@@ -313,8 +320,8 @@ class PropertyRetriever:
             List of property dictionaries in retrieval format
         """
         try:
-            with self._get_listing_repository() as listing_repo:
-                same_suburb_listings = listing_repo.find_same_suburb_listings(
+            async with self._get_listing_repository() as listing_repo:
+                same_suburb_listings = await listing_repo.find_same_suburb_listings(
                     suburb=current_suburb,
                     exclude_listing_id=listing_id,
                     limit=max_nearby_properties
@@ -338,7 +345,7 @@ class PropertyRetriever:
             logger.exception("⚠️  Could not fetch same-suburb properties from database: %s", e)
             return []
 
-    def retrieve(
+    async def retrieve(
         self,
         query: str,
         n_results: int = 5,
@@ -367,6 +374,11 @@ class PropertyRetriever:
         
         topic_count = sum([is_price_query, is_amenity_query, is_attribute_query, is_document_query])
         is_multi_topic = topic_count > 1
+
+        # When caller explicitly requests a single chunk type (e.g. property_document only), respect it
+        # so PDF-only callers get only PDF chunks instead of a mix with pricing/overview.
+        if chunk_types and len(chunk_types) == 1:
+            is_multi_topic = False
 
         if is_multi_topic and listing_id:
             results = []
@@ -414,7 +426,8 @@ class PropertyRetriever:
                         seen_ids.add(r['id'])
             
             self._last_timings["search_rerank_ms"] = (time.perf_counter() - t_after_embed) * 1000.0
-            return self._rerank(results, query)[:n_results]
+            reranked = await self._rerank(results, query)
+            return reranked[:n_results]
 
         if is_price_query and not is_multi_topic:
             allow_hybrid = False
@@ -476,7 +489,8 @@ class PropertyRetriever:
                         seen_ids.add(chunk['id'])
             
             self._last_timings["search_rerank_ms"] = (time.perf_counter() - t_after_embed) * 1000.0
-            return self._rerank(results, query)[:n_results]
+            reranked = await self._rerank(results, query)
+            return reranked[:n_results]
 
         filters = {}
         if listing_id:
@@ -527,10 +541,11 @@ class PropertyRetriever:
                     seen_ids.add(chunk['id'])
 
         self._last_timings["search_rerank_ms"] = (time.perf_counter() - t_after_embed) * 1000.0
-        return self._rerank(results, query)[:n_results]
+        reranked = await self._rerank(results, query)
+        return reranked[:n_results]
 
    
-    def _rerank(
+    async def _rerank(
         self,
         results: List[Dict[str, Any]],
         query: str
@@ -561,7 +576,7 @@ class PropertyRetriever:
         return scored
 
 
-    def retrieve_pricing_info(
+    async def retrieve_pricing_info(
         self,
         query: str,
         listing_id: str
@@ -578,7 +593,7 @@ class PropertyRetriever:
         )
     
     
-    def retrieve_with_location_context(
+    async def retrieve_with_location_context(
         self,
         query: str,
         listing_id: str,
@@ -602,7 +617,7 @@ class PropertyRetriever:
         """
         is_location_query, query_type = detect_location_query(query)
         
-        standard_results = self.retrieve(
+        standard_results = await self.retrieve(
             query=query,
             listing_id=listing_id,
             n_results=n_results
@@ -619,8 +634,8 @@ class PropertyRetriever:
         current_suburb = None
         location_data = None
         try:
-            with self._get_listing_repository() as listing_repo:
-                location_data = listing_repo.get_listing_location(listing_id)
+            async with self._get_listing_repository() as listing_repo:
+                location_data = await listing_repo.get_listing_location(listing_id)
                 if location_data:
                     lat, lon = location_data.get('latitude'), location_data.get('longitude')
                     if lat is not None and lon is not None:
@@ -665,7 +680,7 @@ class PropertyRetriever:
                     max_distance_km,
                 )
                 t_nearby = time.perf_counter()
-                nearby_properties_raw = self._fetch_nearby_properties_from_database(
+                nearby_properties_raw = await self._fetch_nearby_properties_from_database(
                     current_lat=current_lat,
                     current_lon=current_lon,
                     listing_id=listing_id,
@@ -681,7 +696,7 @@ class PropertyRetriever:
             if not nearby_properties_raw and current_suburb:
                 logger.info("   Trying same-suburb properties in '%s'", current_suburb)
                 t_suburb = time.perf_counter()
-                same_suburb_properties = self._fetch_same_suburb_properties_from_database(
+                same_suburb_properties = await self._fetch_same_suburb_properties_from_database(
                     current_suburb=current_suburb,
                     listing_id=listing_id,
                     max_nearby_properties=max_nearby_properties
@@ -716,13 +731,13 @@ class PropertyRetriever:
 
             # Enrich nearby properties with full listing data
             for nearby_prop in nearby_properties_raw:
-                self._enrich_property_with_chunks(nearby_prop)
+                await self._enrich_property_with_chunks(nearby_prop)
             
             nearby_properties = nearby_properties_raw
             
             # Enrich same-suburb properties with full listing data
             for same_suburb_prop in same_suburb_properties:
-                self._enrich_property_with_chunks(same_suburb_prop)
+                await self._enrich_property_with_chunks(same_suburb_prop)
         
         # Format nearby properties JSON and add property media
         nearby_properties_json = []
@@ -749,8 +764,8 @@ class PropertyRetriever:
 
             if listing_ids:
                 try:
-                    with self._get_listing_repository() as listing_repo:
-                        property_media_dict = listing_repo.get_multiple_listing_property_media(listing_ids)
+                    async with self._get_listing_repository() as listing_repo:
+                        property_media_dict = await listing_repo.get_multiple_listing_property_media(listing_ids)
                         logger.info(
                             "📸 Fetched property media for %d listings",
                             len(property_media_dict),

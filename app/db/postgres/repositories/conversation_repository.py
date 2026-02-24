@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, and_, delete, func
 from sqlalchemy.exc import OperationalError, DisconnectionError
 
@@ -32,11 +32,11 @@ class ConversationRepository(BaseRepository[Conversation]):
     Repository for conversation management.
     """
 
-    def __init__(self, session: Session):
+    def __init__(self, session: AsyncSession):
         super().__init__(Conversation, session)
         self.session = session
 
-    def get_or_create_conversation(
+    async def get_or_create_conversation(
         self,
         user_id: UUID,
         listing_id: UUID,
@@ -53,10 +53,10 @@ class ConversationRepository(BaseRepository[Conversation]):
         Returns:
             Conversation instance
         """
-        with self._handle_errors():
+        async with self._handle_errors():
             # Continue explicit conversation
             if conversation_id:
-                conversation = self.get_by_id(conversation_id)
+                conversation = await self.get_by_id(conversation_id)
                 if conversation:
                     return conversation
 
@@ -70,7 +70,7 @@ class ConversationRepository(BaseRepository[Conversation]):
             )
             
             try:
-                result = self.session.execute(query)
+                result = await self.session.execute(query)
                 conversation = result.scalar_one_or_none()
             except (OperationalError, DisconnectionError) as e:
                 # Check if it's a connection closed error
@@ -83,11 +83,11 @@ class ConversationRepository(BaseRepository[Conversation]):
                 ]):
                     # Rollback and retry once with a fresh connection
                     try:
-                        self.session.rollback()
+                        await self.session.rollback()
                     except:
                         pass
                     # Retry the query once
-                    result = self.session.execute(query)
+                    result = await self.session.execute(query)
                     conversation = result.scalar_one_or_none()
                 else:
                     raise
@@ -97,12 +97,11 @@ class ConversationRepository(BaseRepository[Conversation]):
                 cutoff = datetime.now(timezone.utc) - timedelta(days=CONVERSATION_ACTIVE_DAYS)
                 last_activity = conversation.last_message_at or conversation.created_at
                 if last_activity and getattr(last_activity, "tzinfo", None) is None:
-                    # Naive datetime: assume UTC
                     from datetime import timezone as tz
                     last_activity = last_activity.replace(tzinfo=tz.utc)
                 if last_activity and last_activity < cutoff:
                     conversation.is_active = False
-                    self.session.commit()
+                    await self.session.commit()
                     # Fall through to create a new conversation
                 else:
                     return conversation
@@ -118,15 +117,15 @@ class ConversationRepository(BaseRepository[Conversation]):
             )
 
             self.session.add(conversation)
-            self.session.commit()
-            self.session.refresh(conversation)
+            await self.session.commit()
+            await self.session.refresh(conversation)
 
             return conversation
 
     # ------------------------------------------------------------------
     # Add message + increment message_count (ATOMIC)
     # ------------------------------------------------------------------
-    def add_message(
+    async def add_message(
         self,
         conversation_id: UUID,
         role: ConversationRole,
@@ -151,7 +150,7 @@ class ConversationRepository(BaseRepository[Conversation]):
         if conversation_id is None:
             raise ValueError("conversation_id cannot be None")
 
-        with self._handle_errors():
+        async with self._handle_errors():
             now = datetime.now(timezone.utc)
             message = ChatMessage(
                 id=uuid.uuid4(),
@@ -173,26 +172,26 @@ class ConversationRepository(BaseRepository[Conversation]):
                     last_message_at=now,
                 )
             )
-            self.session.execute(stmt)
+            await self.session.execute(stmt)
 
-            self.session.commit()
-            self.session.refresh(message)
+            await self.session.commit()
+            await self.session.refresh(message)
 
             # Prune to latest MAX_MESSAGES_PER_CONVERSATION (delete oldest messages)
-            self._prune_messages_if_needed(conversation_id)
+            await self._prune_messages_if_needed(conversation_id)
 
             return message
 
-    def _prune_messages_if_needed(self, conversation_id: UUID) -> None:
+    async def _prune_messages_if_needed(self, conversation_id: UUID) -> None:
         """
         Keep only the latest MAX_MESSAGES_PER_CONVERSATION messages.
         Deletes oldest messages in the same transaction (commit already done above, so we need a new one).
         """
-        with self._handle_errors():
+        async with self._handle_errors():
             count_query = select(func.count()).select_from(ChatMessage).where(
                 ChatMessage.conversation_id == conversation_id
             )
-            total = self.session.execute(count_query).scalar() or 0
+            total = (await self.session.execute(count_query)).scalar() or 0
             if total <= MAX_MESSAGES_PER_CONVERSATION:
                 return
             # Get created_at of the 100th-newest message (so we delete everything older)
@@ -203,7 +202,7 @@ class ConversationRepository(BaseRepository[Conversation]):
                 .offset(MAX_MESSAGES_PER_CONVERSATION)
                 .limit(1)
             )
-            result = self.session.execute(cutoff_subq)
+            result = await self.session.execute(cutoff_subq)
             row = result.fetchone()
             if not row:
                 return
@@ -214,14 +213,14 @@ class ConversationRepository(BaseRepository[Conversation]):
                     ChatMessage.created_at < cutoff_at,
                 )
             )
-            self.session.execute(stmt)
+            await self.session.execute(stmt)
             from sqlalchemy import update
-            self.session.execute(
+            await self.session.execute(
                 update(Conversation)
                 .where(Conversation.id == conversation_id)
                 .values(message_count=MAX_MESSAGES_PER_CONVERSATION)
             )
-            self.session.commit()
+            await self.session.commit()
 
     def _format_message(
         self,
@@ -239,8 +238,8 @@ class ConversationRepository(BaseRepository[Conversation]):
             Formatted message dictionary
         """
         item = {
-            "message_id": str(msg.id),  # Include message ID
-            "role": msg.role.value,  # enum → string
+            "message_id": str(msg.id),
+            "role": msg.role.value,
             "content": msg.content,
             "created_at": msg.created_at.isoformat() if msg.created_at else None,
         }
@@ -256,7 +255,7 @@ class ConversationRepository(BaseRepository[Conversation]):
     # ------------------------------------------------------------------
     # Get messages formatted for LLM context
     # ------------------------------------------------------------------
-    def get_conversation_messages(
+    async def get_conversation_messages(
         self,
         conversation_id: UUID,
         limit: Optional[int] = None,
@@ -276,7 +275,7 @@ class ConversationRepository(BaseRepository[Conversation]):
         Returns:
             List of formatted message dictionaries in chronological order
         """
-        with self._handle_errors():
+        async with self._handle_errors():
             if limit:
                 # Get LATEST N messages: order by created_at DESC, limit, then reverse
                 query = (
@@ -285,9 +284,9 @@ class ConversationRepository(BaseRepository[Conversation]):
                     .order_by(desc(ChatMessage.created_at))
                     .limit(limit)
                 )
-                result = self.session.execute(query)
+                result = await self.session.execute(query)
                 messages = list(result.scalars().all())
-                messages.reverse()  # Reverse to get chronological order (oldest to newest)
+                messages.reverse()
             else:
                 # Get ALL messages in chronological order
                 query = (
@@ -295,7 +294,7 @@ class ConversationRepository(BaseRepository[Conversation]):
                     .where(ChatMessage.conversation_id == conversation_id)
                     .order_by(ChatMessage.created_at)
                 )
-                result = self.session.execute(query)
+                result = await self.session.execute(query)
                 messages = result.scalars().all()
 
             return [
@@ -306,7 +305,7 @@ class ConversationRepository(BaseRepository[Conversation]):
     # ------------------------------------------------------------------
     # Get most recent N messages (chronological order)
     # ------------------------------------------------------------------
-    def get_recent_messages(
+    async def get_recent_messages(
         self,
         conversation_id: UUID,
         n_messages: int = 10,
@@ -321,7 +320,7 @@ class ConversationRepository(BaseRepository[Conversation]):
         Returns:
             List of formatted message dictionaries in chronological order
         """
-        with self._handle_errors():
+        async with self._handle_errors():
             query = (
                 select(ChatMessage)
                 .where(ChatMessage.conversation_id == conversation_id)
@@ -329,16 +328,16 @@ class ConversationRepository(BaseRepository[Conversation]):
                 .limit(n_messages)
             )
 
-            result = self.session.execute(query)
+            result = await self.session.execute(query)
             messages = list(result.scalars().all())
-            messages.reverse()  # Reverse to get chronological order
+            messages.reverse()
 
             return [
                 self._format_message(msg, include_metadata=False)
                 for msg in messages
             ]
 
-    def deactivate_conversation(self, conversation_id: UUID) -> bool:
+    async def deactivate_conversation(self, conversation_id: UUID) -> bool:
         """
         Deactivate a conversation by setting is_active to False.
         
@@ -348,19 +347,19 @@ class ConversationRepository(BaseRepository[Conversation]):
         Returns:
             True if deactivated, False if conversation not found
         """
-        with self._handle_errors():
-            conversation = self.get_by_id(conversation_id)
+        async with self._handle_errors():
+            conversation = await self.get_by_id(conversation_id)
             if not conversation:
                 return False
 
             conversation.is_active = False
-            self.session.commit()
+            await self.session.commit()
             return True
 
     # ------------------------------------------------------------------
     # Get conversations for a user
     # ------------------------------------------------------------------
-    def get_user_conversations(
+    async def get_user_conversations(
         self,
         user_id: UUID,
         listing_id: Optional[UUID] = None,
@@ -377,7 +376,7 @@ class ConversationRepository(BaseRepository[Conversation]):
         Returns:
             List of Conversation instances, ordered by most recent first
         """
-        with self._handle_errors():
+        async with self._handle_errors():
             query = select(Conversation).where(Conversation.user_id == user_id)
 
             if listing_id:
@@ -388,13 +387,13 @@ class ConversationRepository(BaseRepository[Conversation]):
 
             query = query.order_by(desc(Conversation.created_at))
 
-            result = self.session.execute(query)
+            result = await self.session.execute(query)
             return list(result.scalars().all())
 
     # ------------------------------------------------------------------
     # Get all conversations for a listing (for property-level summaries)
     # ------------------------------------------------------------------
-    def get_listing_conversations(
+    async def get_listing_conversations(
         self,
         listing_id: UUID,
         active_only: bool = True,
@@ -412,7 +411,7 @@ class ConversationRepository(BaseRepository[Conversation]):
         Returns:
             List of Conversation instances, ordered by most recent first
         """
-        with self._handle_errors():
+        async with self._handle_errors():
             query = select(Conversation).where(
                 Conversation.listing_id == listing_id
             )
@@ -425,13 +424,14 @@ class ConversationRepository(BaseRepository[Conversation]):
             if limit:
                 query = query.limit(limit)
 
-            result = self.session.execute(query)
+            result = await self.session.execute(query)
             return list(result.scalars().all())
 
-    def get_listing_user_messages(
+    async def get_listing_user_messages(
         self,
         listing_id: UUID,
         limit_per_conversation: Optional[int] = None,
+        active_only: bool = True,
     ) -> List[Dict[str, Any]]:
         """
         Get all user messages (questions) for a listing across all conversations.
@@ -440,16 +440,17 @@ class ConversationRepository(BaseRepository[Conversation]):
         Args:
             listing_id: Listing ID
             limit_per_conversation: Optional limit on messages per conversation
+            active_only: If True, only include messages from active conversations; if False, include all (e.g. for cron summary)
             
         Returns:
             List of user message dictionaries with content, metadata, and timestamps
             (user_id is excluded for privacy)
         """
-        with self._handle_errors():
+        async with self._handle_errors():
             # Get all conversations for this listing
-            conversations = self.get_listing_conversations(
+            conversations = await self.get_listing_conversations(
                 listing_id=listing_id,
-                active_only=True,
+                active_only=active_only,
             )
 
             all_user_messages = []
@@ -469,11 +470,10 @@ class ConversationRepository(BaseRepository[Conversation]):
                 if limit_per_conversation:
                     query = query.limit(limit_per_conversation)
 
-                result = self.session.execute(query)
+                result = await self.session.execute(query)
                 messages = result.scalars().all()
 
                 for msg in messages:
-                    # Format message without user_id for privacy
                     message_data = {
                         "content": msg.content,
                         "created_at": msg.created_at.isoformat() if msg.created_at else None,

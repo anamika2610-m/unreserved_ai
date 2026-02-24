@@ -5,7 +5,7 @@ No separate table needed - calculates on-the-fly from conversations and chat_mes
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, distinct, case
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -18,10 +18,10 @@ class ListingActivityRepository:
     No separate table needed - queries conversations and chat_messages on-the-fly.
     """
     
-    def __init__(self, db_session: Session):
+    def __init__(self, db_session: AsyncSession):
         self.db_session = db_session
     
-    def get_activity_dict(self, listing_id: UUID) -> Optional[Dict[str, Any]]:
+    async def get_activity_dict(self, listing_id: UUID) -> Optional[Dict[str, Any]]:
         """
         Calculate activity metrics from existing tables.
         
@@ -31,7 +31,6 @@ class ListingActivityRepository:
         Returns:
             Dictionary of metrics
         """
-        # Get listing created_at date from listings table
         from sqlalchemy import text
         
         listing_query = text("""
@@ -40,15 +39,12 @@ class ListingActivityRepository:
             WHERE id = :listing_id
         """)
         
-        result = self.db_session.execute(
+        result = await self.db_session.execute(
             listing_query, {"listing_id": str(listing_id)}
         )
         listing_result = result.fetchone()
         result.close()
-        # ✅ MUST commit read-only queries to prevent "idle in transaction"
-        # Even though FastAPI's get_db() manages session lifecycle, we need to
-        # explicitly commit/rollback to close the transaction immediately
-        self.db_session.commit()
+        await self.db_session.commit()
         
         if not listing_result:
             return None
@@ -57,19 +53,14 @@ class ListingActivityRepository:
         if not listing_created_at:
             return None
         
-        # Calculate time windows
-        # Ensure both datetimes are timezone-aware
         now = datetime.now(timezone.utc)
         
-        # If listing_created_at is naive, make it timezone-aware
         if listing_created_at.tzinfo is None:
             listing_created_at = listing_created_at.replace(tzinfo=timezone.utc)
         
-        # First-week window: from listing_created_at to +7 days
         first_week_start = listing_created_at
         first_week_cutoff = listing_created_at + timedelta(days=7)
         
-        # Rolling 7-day window: from now-7d to now
         rolling_end = now
         rolling_start = now - timedelta(days=7)
         
@@ -78,7 +69,6 @@ class ListingActivityRepository:
         print(f"   First-week window: {first_week_start} to {first_week_cutoff}")
         print(f"   Rolling 7-day window: {rolling_start} to {rolling_end}")
         
-        # Initialize all metrics to 0
         enquiries_7d = 0
         repeat_buyers_7d = 0
         property_type = "house"
@@ -91,7 +81,6 @@ class ListingActivityRepository:
         bp_inspections_7d = 0
         
         # 1. Enquiries from listing_crm_enquiries and enquiries tables
-        # Note: enquiries table links to listings via listing_crm_enquiry_id -> listing_crm_enquiries.listing_id
         try:
             enquiries_7d_query = text("""
                 SELECT COUNT(*) 
@@ -107,11 +96,10 @@ class ListingActivityRepository:
                 ) AS combined_enquiries
             """)
             
-            result = self.db_session.execute(
+            result = await self.db_session.execute(
                 enquiries_7d_query,
                 {
                     "listing_id": str(listing_id),
-                    # Use rolling 7-day window for current activity metrics
                     "listing_start": rolling_start,
                     "week_cutoff": rolling_end,
                 }
@@ -119,18 +107,16 @@ class ListingActivityRepository:
             enquiries_7d = result.scalar() or 0
             result.close()
             print(f"   ✅ enquiries_7d: {enquiries_7d}")
-            # Don't commit read-only queries - let FastAPI's get_db() handle session cleanup
         except Exception as e:
             print(f"⚠️  Error querying enquiries: {e}")
             import traceback
             print(traceback.format_exc())
             try:
-                self.db_session.rollback()
+                await self.db_session.rollback()
             except:
                 pass
         
         # Repeat buyers (buyers with >= 2 enquiries in first 7 days)
-        # Note: Only enquiries table has user_id, listing_crm_enquiries doesn't have buyer identifier
         try:
             repeat_buyers_7d_query = text("""
                 SELECT COUNT(*)
@@ -146,7 +132,7 @@ class ListingActivityRepository:
                 ) AS repeat_buyers
             """)
             
-            result = self.db_session.execute(
+            result = await self.db_session.execute(
                 repeat_buyers_7d_query,
                 {
                     "listing_id": str(listing_id),
@@ -157,13 +143,12 @@ class ListingActivityRepository:
             repeat_buyers_7d = result.scalar() or 0
             result.close()
             print(f"   ✅ repeat_buyers_7d: {repeat_buyers_7d}")
-            # Don't commit read-only queries
         except Exception as e:
             print(f"⚠️  Error querying repeat buyers: {e}")
             import traceback
             print(traceback.format_exc())
             try:
-                self.db_session.rollback()
+                await self.db_session.rollback()
             except:
                 pass
         
@@ -177,12 +162,11 @@ class ListingActivityRepository:
                 WHERE l.id = :listing_id
             """)
             
-            result = self.db_session.execute(
+            result = await self.db_session.execute(
                 property_type_query, {"listing_id": str(listing_id)}
             )
             property_type_result = result.fetchone()
             result.close()
-            # Don't commit read-only queries
             
             if property_type_result and property_type_result[0]:
                 property_type_name = property_type_result[0].lower()
@@ -193,21 +177,12 @@ class ListingActivityRepository:
         except Exception as e:
             print(f"⚠️  Error querying property type: {e}")
             try:
-                self.db_session.rollback()
+                await self.db_session.rollback()
             except:
                 pass
         
         # 3. First inspection groups (within rolling 7 days)
-        # Note:
-        # - registered_inspections links to listing_inspections via listing_inspection_id
-        # - We use the registration timestamp (registered_inspections.created_at) for the rolling
-        #   7-day window, not the scheduled inspection_start_time (which may be in the future).
-        # - This matches the UX expectation: once an inspection is attended "now", it should be
-        #   reflected in the current rolling metrics.
-        # - We still keep the concept of "first" by using the earliest attended registration time
-        #   in the rolling window, then counting groups at that time.
         try:
-            # First, get the earliest attended registration time in the rolling window
             first_date_query = text("""
                 SELECT MIN(ri.created_at) AS first_inspection_time
                 FROM registered_inspections ri
@@ -217,7 +192,7 @@ class ListingActivityRepository:
                   AND ri.created_at BETWEEN :listing_start AND :week_cutoff
             """)
             
-            result = self.db_session.execute(
+            result = await self.db_session.execute(
                 first_date_query,
                 {
                     "listing_id": str(listing_id),
@@ -230,7 +205,6 @@ class ListingActivityRepository:
             
             if first_date_result:
                 first_inspection_time = first_date_result
-                # Now count groups (registrations) at that first attended inspection time
                 groups_query = text("""
                     SELECT COUNT(DISTINCT ri.id) AS groups_count
                     FROM registered_inspections ri
@@ -240,7 +214,7 @@ class ListingActivityRepository:
                       AND ri.created_at = :first_inspection_time
                 """)
                 
-                result = self.db_session.execute(
+                result = await self.db_session.execute(
                     groups_query,
                     {
                         "listing_id": str(listing_id),
@@ -257,7 +231,7 @@ class ListingActivityRepository:
             import traceback
             print(traceback.format_exc())
             try:
-                self.db_session.rollback()
+                await self.db_session.rollback()
             except:
                 pass
         
@@ -278,7 +252,7 @@ class ListingActivityRepository:
                 ) AS multi_buyers
             """)
             
-            result = self.db_session.execute(
+            result = await self.db_session.execute(
                 multi_inspection_buyers_7d_query,
                 {
                     "listing_id": str(listing_id),
@@ -289,19 +263,17 @@ class ListingActivityRepository:
             multi_inspection_buyers_7d = result.scalar() or 0
             result.close()
             print(f"   ✅ multi_inspection_buyers_7d: {multi_inspection_buyers_7d}")
-            # Don't commit read-only queries
         except Exception as e:
             print(f"⚠️  Error querying multi-inspection buyers: {e}")
             import traceback
             print(traceback.format_exc())
             try:
-                self.db_session.rollback()
+                await self.db_session.rollback()
             except:
                 pass
         
-        # 5. Contract requests (offers with signature_status != "offeror_sign_pending" in first 7 days)
+        # 5. Contract requests
         try:
-            # Debug: Check all offers for this listing first
             debug_offers_query = text("""
                 SELECT id, signature_status, created_at, listing_id
                 FROM offers
@@ -310,7 +282,7 @@ class ListingActivityRepository:
                 LIMIT 10
             """)
             
-            debug_result = self.db_session.execute(
+            debug_result = await self.db_session.execute(
                 debug_offers_query,
                 {"listing_id": str(listing_id)}
             )
@@ -337,7 +309,6 @@ class ListingActivityRepository:
             else:
                 print(f"   ℹ️  No offers found for this listing")
             
-            # Now run the actual query
             contract_requests_7d_query = text("""
                 SELECT COUNT(*)
                 FROM offers
@@ -346,7 +317,7 @@ class ListingActivityRepository:
                 AND created_at BETWEEN :listing_start AND :week_cutoff
             """)
             
-            result = self.db_session.execute(
+            result = await self.db_session.execute(
                 contract_requests_7d_query,
                 {
                     "listing_id": str(listing_id),
@@ -361,21 +332,19 @@ class ListingActivityRepository:
                 f"(filtered by rolling 7-day window {rolling_start} to {rolling_end} "
                 f"and signature_status != 'offeror_sign_pending')"
             )
-            # Don't commit read-only queries
         except Exception as e:
             print(f"⚠️  Error querying contract requests: {e}")
             import traceback
             print(traceback.format_exc())
             try:
-                self.db_session.rollback()
+                await self.db_session.rollback()
             except:
                 pass
         
-        # 6. Genuine offers (same as contract requests: signature_status != "offeror_sign_pending")
+        # 6. Genuine offers (same as contract requests)
         genuine_offers_7d = contract_requests_7d
         
-        # 7. Competing offers (distinct buyers with offers in first 7 days where offer count >= 8)
-        # Note: Join through bid_id -> auction_bids.bidder_id to get the buyer
+        # 7. Competing offers
         try:
             competing_offers_7d_query = text("""
                 SELECT COUNT(*)
@@ -391,7 +360,7 @@ class ListingActivityRepository:
                 ) AS competing_buyers
             """)
             
-            result = self.db_session.execute(
+            result = await self.db_session.execute(
                 competing_offers_7d_query,
                 {
                     "listing_id": str(listing_id),
@@ -402,17 +371,16 @@ class ListingActivityRepository:
             competing_offers_7d = result.scalar() or 0
             result.close()
             print(f"   ✅ competing_offers_7d: {competing_offers_7d}")
-            # Don't commit read-only queries
         except Exception as e:
             print(f"⚠️  Error querying competing offers: {e}")
             import traceback
             print(traceback.format_exc())
             try:
-                self.db_session.rollback()
+                await self.db_session.rollback()
             except:
                 pass
         
-        # 8. B&P inspections (document_requests with is_b_and_p_inspection_required = true)
+        # 8. B&P inspections
         try:
             bp_inspections_7d_query = text("""
                 SELECT COUNT(DISTINCT id)
@@ -422,7 +390,7 @@ class ListingActivityRepository:
                 AND created_at BETWEEN :listing_start AND :week_cutoff
             """)
             
-            result = self.db_session.execute(
+            result = await self.db_session.execute(
                 bp_inspections_7d_query,
                 {
                     "listing_id": str(listing_id),
@@ -433,24 +401,22 @@ class ListingActivityRepository:
             bp_inspections_7d = result.scalar() or 0
             result.close()
             print(f"   ✅ bp_inspections_7d: {bp_inspections_7d}")
-            # Don't commit read-only queries
         except Exception as e:
             print(f"⚠️  Error querying B&P inspections: {e}")
             import traceback
             print(traceback.format_exc())
             try:
-                self.db_session.rollback()
+                await self.db_session.rollback()
             except:
                 pass
         
-        # ✅ CRITICAL: Commit to close the transaction and prevent "idle in transaction"
-        # All queries above are read-only, but the transaction MUST be closed
+        # Commit to close the transaction and prevent "idle in transaction"
         try:
-            self.db_session.commit()
+            await self.db_session.commit()
         except Exception as e:
             print(f"⚠️  Failed to commit read transaction: {e}")
             try:
-                self.db_session.rollback()
+                await self.db_session.rollback()
             except:
                 pass
         

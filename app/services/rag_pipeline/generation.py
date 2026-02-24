@@ -2,10 +2,12 @@
 Generation module for creating AI responses to buyer enquiries.
 """
 import logging
+import os
 import re
 import time
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Tuple
+
 
 from app.services.rag_pipeline.llms import (
     get_model_config,
@@ -28,6 +30,8 @@ from app.services.rag_pipeline.config import (
     DEFAULT_MAX_NEARBY_PROPERTIES,
 )
 from app.schemas import AIResponse, EnquiryLog
+from app.core.exceptions import classify_llm_error
+from app.db.connection import get_session_maker
 from app.services.rag_pipeline.augmentation import QueryAugmenter
 from app.services.rag_pipeline.preprocess import detect_enquiry_type, detect_query_source
 from app.services.rag_pipeline.postprocess import sanitize_response
@@ -78,6 +82,18 @@ INVALID_AMENITY_TERMS = [
     'song', 'songs', 'music', 'movie', 'pets', 'animals', 'people', 'friends', 'job', 'work'
 ]
 
+# Queries that ask about inspection times/slots for a listing → we fetch from listing_inspections
+INSPECTION_QUERY_KEYWORDS = [
+    'inspection slot', 'inspection slots', 'inspection time', 'inspection times',
+    'inspection schedule', 'inspection dates', 'when can i inspect', 'when to inspect',
+    'open for inspection', 'book inspection', 'book a viewing', 'closest to be booked',
+    'which inspection', 'next inspection', 'upcoming inspection', 'viewing times',
+]
+
+# Tone adaptation only when user is sufficiently conversational (has asked at least this many questions)
+# Set TONE_ADAPTATION_MIN_USER_MESSAGES=10 in env to require 10+ messages instead of 7.
+TONE_ADAPTATION_MIN_USER_MESSAGES = int(os.getenv("TONE_ADAPTATION_MIN_USER_MESSAGES", "7"))
+
 PROMPT_VERSION = "1.0"
 
 
@@ -92,43 +108,7 @@ class ResponseGenerator:
         self.model_name = get_model_name()
         self.tone_service = ToneAdaptationService()
     
-    # ------------------------------------------------------------------
-    # 🔒 LLM ERROR CLASSIFIER (CRITICAL)
-    # ------------------------------------------------------------------
-    def _classify_llm_error(self, error: Exception) -> str:
-        msg = str(error).lower()
-        error_type_name = type(error).__name__.lower()
-        
-        # Rate limit errors
-        if "429" in msg or "rate_limit" in msg or "rate limit" in msg:
-            return "rate_limit"
-        
-        # Context length errors
-        if "context_length" in msg or "maximum context" in msg or "context window" in msg:
-            return "context_length"
-        
-        # Timeout errors
-        if "timeout" in msg or "timed out" in msg:
-            return "timeout"
-        
-        # Authentication/API key errors
-        if "authentication" in msg or "api key" in msg or "unauthorized" in msg or "401" in msg:
-            return "auth"
-        
-        # Model access/permission errors
-        # Check for PermissionDeniedError or 403 errors related to models
-        if "permissiondenied" in error_type_name or "403" in msg:
-            if "model" in msg or "does not have access" in msg:
-                return "model"
-            return "auth"  # Other 403 errors are auth-related
-        
-        # Model not found or access denied
-        if ("model" in msg and ("not found" in msg or "does not have access" in msg or "not available" in msg)):
-            return "model"
-        
-        return "unknown"
-
-    def _do_conversational_reply(
+    async def _do_conversational_reply(
         self,
         query: str,
         conversation_history: Optional[List[Dict[str, str]]],
@@ -137,7 +117,7 @@ class ResponseGenerator:
     ) -> Dict[str, Any]:
         """Build and return the standard response dict for conversational/acknowledgment replies."""
         try:
-            answer = self._generate_conversational_reply(query, conversation_history)
+            answer = await self._generate_conversational_reply(query, conversation_history)
         except Exception as e:
             logger.warning("⚠️ Conversational LLM fallback error: %s", e)
             answer = (
@@ -240,7 +220,7 @@ class ResponseGenerator:
             "amenity_links": [],
         }
 
-    def _try_generic_knowledge_first(
+    async def _try_generic_knowledge_first(
         self,
         query: str,
         n_retrieval_results: int,
@@ -257,7 +237,7 @@ class ResponseGenerator:
             "🔍 Step 1: Generic query detected → trying generic knowledge store first",
         )
         _t = time.perf_counter()
-        generic_context, generic_data_sources, _ = self.augmenter.augment_query(
+        generic_context, generic_data_sources, _ = await self.augmenter.augment_query(
             query=query,
             listing_id=None,
             n_results=n_retrieval_results,
@@ -284,17 +264,28 @@ class ResponseGenerator:
             len(generic_data_sources) if generic_data_sources else 0,
             len(generic_context) if generic_context else 0,
         )
+        _trend_kw = (
+            'price trend', 'price trends', 'market trend', 'market trends',
+            'trends for this area', 'price trends for', 'market trends for',
+            'trends in this area', 'trends in the area', 'trend in',
+        )
+        is_trend = any(kw in query.lower() for kw in _trend_kw)
         if is_enquiry_message:
             answer = (
                 "This is an automated email. We don't have enough information to answer this enquiry "
                 "right now, but we will get back to you shortly."
             )
+        elif is_trend and listing_id:
+            answer = (
+                "I don't have price or market trend data for this area in the listing documents. "
+                "For a detailed market report, please contact the agent or Unreserved. "
+                "I can help with this property's asking price, features, inspections, and location."
+            )
         else:
             answer = (
-                "I don't have detailed information on that topic. "
-                "For specific questions about real estate law, licensing, or processes in Victoria, "
-                "I recommend consulting with a qualified professional such as a lawyer, "
-                "licensed real estate agent, or Consumer Affairs Victoria (CAV)."
+                "I don't have sufficient information in the available listing data "
+                "to answer this fully.\n\n"
+                "Please contact the Unreserved Admin for more information."
             )
         response_dict = self._create_response_dict(
             answer=answer,
@@ -310,7 +301,7 @@ class ResponseGenerator:
     # ------------------------------------------------------------------
     # MAIN GENERATION METHOD
     # ------------------------------------------------------------------
-    def generate_response(
+    async def generate_response(
         self,
         query: str,
         listing_id: Optional[str] = None,
@@ -347,17 +338,17 @@ class ResponseGenerator:
 
         if is_conversational or is_acknowledgment:
             logger.info("✅ Conversational/acknowledgment detected → LLM replying naturally (skipping retrieval)")
-            return self._do_conversational_reply(query, conversation_history, listing_id, user_id)
+            return await self._do_conversational_reply(query, conversation_history, listing_id, user_id)
 
         # For short or ambiguous messages, let the LLM decide if this needs listing data or is conversational
         word_count = len(query_stripped.split())
         char_count = len(query_stripped)
         is_short_or_ambiguous = word_count <= 12 or char_count <= 80
         if is_short_or_ambiguous:
-            intent = self._classify_intent_listing_vs_conversational(query, conversation_history)
+            intent = await self._classify_intent_listing_vs_conversational(query, conversation_history)
             if intent == "conversational":
                 logger.info("✅ Intent classifier → conversational (skipping retrieval)")
-                return self._do_conversational_reply(query, conversation_history, listing_id, user_id)
+                return await self._do_conversational_reply(query, conversation_history, listing_id, user_id)
 
         # 0.5️⃣ Check for greetings FIRST (before any routing)
         _t = time.perf_counter()
@@ -387,18 +378,28 @@ class ResponseGenerator:
         # Strong generic indicators (legal/process questions that should skip property data entirely)
         is_strong_generic = any(kw in query.lower() for kw in STRONG_GENERIC_KEYWORDS)
 
+        # Trend queries (price/market trends): use property path so we fetch property PDF; don't go generic-first
+        _trend_keywords = (
+            'price trend', 'price trends', 'market trend', 'market trends',
+            'trends for this area', 'price trends for', 'market trends for',
+            'trends in this area', 'trends in the area', 'trend in',
+        )
+        is_trend_query = any(kw in query.lower() for kw in _trend_keywords)
+
         logger.debug(
-            "🔍 Query detection: query_source_detected=%s, is_strong_generic=%s, listing_id=%s",
+            "🔍 Query detection: query_source_detected=%s, is_strong_generic=%s, listing_id=%s, is_trend_query=%s",
             query_source_detected,
             is_strong_generic,
             listing_id,
+            is_trend_query,
         )
 
         # 3️⃣ CASCADING FALLBACK LOGIC
         # Priority 1: If query is detected as generic (legal/process), go to generic knowledge first
-        if is_strong_generic or query_source_detected == 'generic':
+        # Exception: trend queries with listing_id use property path so we fetch property PDF
+        if (is_strong_generic or query_source_detected == 'generic') and not (listing_id and is_trend_query):
             early_return, context, data_sources, location_context, query_source = (
-                self._try_generic_knowledge_first(
+                await self._try_generic_knowledge_first(
                     query=query,
                     n_retrieval_results=n_retrieval_results,
                     is_enquiry_message=is_enquiry_message,
@@ -429,12 +430,11 @@ class ResponseGenerator:
                 _t_db = time.perf_counter()
                 try:
                     from app.db.postgres.repositories.listing_repository import ListingRepository
-                    from app.db.session import SessionLocal
-                    
-                    db_session = SessionLocal()
-                    try:
+                    from app.db.connection import get_session_maker
+                    async_session_maker = get_session_maker()
+                    async with async_session_maker() as db_session:
                         listing_repo = ListingRepository(db_session)
-                        listing_data = listing_repo._execute_query_one(
+                        listing_data = await listing_repo._execute_query_one(
                             "SELECT display_price FROM listings WHERE id = :listing_id",
                             {"listing_id": listing_id}
                         )
@@ -445,8 +445,7 @@ class ResponseGenerator:
                                 display_price,
                                 listing_id,
                             )
-                    finally:
-                        db_session.close()
+                   
                 except Exception as e:
                     logger.warning(
                         "⚠️  Failed to fetch displayPrice from database for %s: %s: %s",
@@ -462,7 +461,7 @@ class ResponseGenerator:
                     "           → This includes: overview, pricing, specifications, location chunks (excludes property_document)",
                 )
                 _t = time.perf_counter()
-                property_json_context, property_json_data_sources, property_location_context = self.augmenter.augment_query_json_chunks(
+                property_json_context, property_json_data_sources, property_location_context = await self.augmenter.augment_query_json_chunks(
                     query=query,
                     listing_id=listing_id,
                     n_results=n_retrieval_results
@@ -499,7 +498,7 @@ class ResponseGenerator:
                     # For sufficiency check, we need at least an empty list if no data sources
                     check_data_sources = property_json_data_sources if property_json_data_sources else []
                     
-                    property_sufficient, insufficiency_reason = self.augmenter.check_data_sufficiency(
+                    property_sufficient, insufficiency_reason = await self.augmenter.check_data_sufficiency(
                         query=query,
                         retrieved_context=property_json_context,
                         data_sources=check_data_sources,
@@ -551,7 +550,7 @@ class ResponseGenerator:
                         logger.debug("           → Reason: %s", insufficiency_reason)
                         logger.info("🔍 Step 2/4: Skipping JSON → Trying ONLY property-specific PDFs (document query)")
                         _t = time.perf_counter()
-                        property_pdf_context, property_pdf_data_sources, property_location_context = self.augmenter.augment_query_pdf_chunks(
+                        property_pdf_context, property_pdf_data_sources, property_location_context = await self.augmenter.augment_query_pdf_chunks(
                             query=query,
                             listing_id=listing_id,
                             n_results=n_retrieval_results
@@ -560,7 +559,7 @@ class ResponseGenerator:
                         
                         # Check if property PDF data is sufficient
                         if property_pdf_data_sources:
-                            property_sufficient, insufficiency_reason = self.augmenter.check_data_sufficiency(
+                            property_sufficient, insufficiency_reason = await self.augmenter.check_data_sufficiency(
                                 query=query,
                                 retrieved_context=property_pdf_context,
                                 data_sources=property_pdf_data_sources,
@@ -629,7 +628,7 @@ class ResponseGenerator:
                             logger.debug("           → Reason: %s", insufficiency_reason)
                             logger.info("🔍 Step 2/4: Trying property-specific PDFs to SUPPLEMENT JSON data")
                             _t = time.perf_counter()
-                            property_pdf_context, property_pdf_data_sources, _ = self.augmenter.augment_query_pdf_chunks(
+                            property_pdf_context, property_pdf_data_sources, _ = await self.augmenter.augment_query_pdf_chunks(
                                 query=query,
                                 listing_id=listing_id,
                                 n_results=n_retrieval_results
@@ -672,7 +671,7 @@ class ResponseGenerator:
                         # Step 2/4: Try property-specific PDFs (only if NO JSON data exists)
                         logger.info("🔍 Step 2/4: No JSON data → Trying property-specific PDFs (property_document chunks)")
                         _t = time.perf_counter()
-                        property_pdf_context, property_pdf_data_sources, property_location_context = self.augmenter.augment_query_pdf_chunks(
+                        property_pdf_context, property_pdf_data_sources, property_location_context = await self.augmenter.augment_query_pdf_chunks(
                             query=query,
                             listing_id=listing_id,
                             n_results=n_retrieval_results
@@ -681,7 +680,7 @@ class ResponseGenerator:
                         
                         # Check if property PDF data is sufficient
                         if property_pdf_data_sources:
-                            property_sufficient, insufficiency_reason = self.augmenter.check_data_sufficiency(
+                            property_sufficient, insufficiency_reason = await self.augmenter.check_data_sufficiency(
                                 query=query,
                                 retrieved_context=property_pdf_context,
                                 data_sources=property_pdf_data_sources,
@@ -722,7 +721,7 @@ class ResponseGenerator:
             has_location_data = property_location_context and property_location_context.get('nearby_properties_json')
             if not property_sufficient or (not property_json_data_sources and not property_pdf_data_sources and not has_location_data):
                 logger.info("🔍 Step 3/4: Trying generic knowledge (generic PDFs from generic_knowledge)")
-                generic_context, generic_data_sources, _ = self.augmenter.augment_query(
+                generic_context, generic_data_sources, _ = await self.augmenter.augment_query(
                     query=query,
                     listing_id=None,
                     n_results=n_retrieval_results,
@@ -762,28 +761,51 @@ class ResponseGenerator:
                     logger.info("⚠️  Step 3/4: No generic knowledge found")
             
             # Step 4/4: If all previous steps failed, escalate to vendor
-            # Don't escalate if we have location_context with nearby properties
+            # UNLESS listing has lat/lon → we can answer amenity queries (e.g. nearby police stations) with Google Maps links
             has_location_data = property_location_context and property_location_context.get('nearby_properties_json')
             if not property_sufficient or (not property_json_data_sources and not property_pdf_data_sources and not has_location_data):
                 if not (generic_data_sources and generic_context and generic_context.strip()):
-                    logger.info("⚠️  Step 4/4: All data sources insufficient → escalating to vendor")
-                    fallback_reason = insufficiency_reason if insufficiency_reason else (
-                        "Insufficient information in property JSON, property PDFs, and no relevant generic knowledge found"
-                    )
-                    answer = self._generate_vendor_contact_message(query, fallback_reason, is_enquiry_message)
+                    skip_escalation_for_amenity_links = False
+                    if listing_id:
+                        try:
+                            from app.db.postgres.repositories.listing_repository import ListingRepository
+                            async_session_maker = get_session_maker()
+                            async with async_session_maker() as db_session:
+                                listing_repo = ListingRepository(db_session)
+                                loc = await listing_repo.get_listing_location(listing_id)
+                                if loc and loc.get('latitude') is not None and loc.get('longitude') is not None:
+                                    skip_escalation_for_amenity_links = True
+                                    if not location_context:
+                                        location_context = {}
+                                    location_context['latitude'] = loc.get('latitude')
+                                    location_context['longitude'] = loc.get('longitude')
+                                    context = (
+                                        "The user is asking about nearby amenities (e.g. police stations, schools, hospitals). "
+                                        "Use the Google Maps links provided below to direct them."
+                                    )
+                                    logger.info("🗺️  Step 4/4: Listing has coordinates → skipping vendor escalation, will use amenity links")
+                        except Exception as e:
+                            logger.debug("Step 4/4: Could not fetch listing location: %s", e)
 
-                    # Combine all attempted data sources for logging
-                    all_data_sources = property_json_data_sources + property_pdf_data_sources
+                    if not skip_escalation_for_amenity_links:
+                        logger.info("⚠️  Step 4/4: All data sources insufficient → escalating to vendor")
+                        fallback_reason = insufficiency_reason if insufficiency_reason else (
+                            "Insufficient information in property JSON, property PDFs, and no relevant generic knowledge found"
+                        )
+                        answer = await self._generate_vendor_contact_message(query, fallback_reason, is_enquiry_message)
 
-                    return self._create_response_dict(
-                        answer=answer,
-                        needs_vendor_contact=True,
-                        escalation_reason=fallback_reason,
-                        data_sources=all_data_sources,
-                        query=query,
-                        listing_id=listing_id,
-                        user_id=user_id,
-                    )
+                        # Combine all attempted data sources for logging
+                        all_data_sources = property_json_data_sources + property_pdf_data_sources
+
+                        return self._create_response_dict(
+                            answer=answer,
+                            needs_vendor_contact=True,
+                            escalation_reason=fallback_reason,
+                            data_sources=all_data_sources,
+                            query=query,
+                            listing_id=listing_id,
+                            user_id=user_id,
+                        )
             
             # If we reach here, we have sufficient data (from one of the steps)
             # NOTE: This section is now mostly redundant as we handle context/data_sources
@@ -802,11 +824,60 @@ class ResponseGenerator:
                     data_sources = property_pdf_data_sources
                 location_context = property_location_context
                 query_source = 'property'
-        
+
+        # Trend queries (price trends, market trends): ensure we fetch property PDF chunks even when we already have JSON context.
+        # JSON often has only asking price; trend content usually lives in property_document PDFs.
+        if listing_id and is_trend_query:
+            try:
+                pdf_ctx, pdf_sources, _ = await self.augmenter.augment_query_pdf_chunks(
+                    query=query, listing_id=listing_id, n_results=8
+                )
+                if pdf_ctx and pdf_ctx.strip() and pdf_sources:
+                    if context and data_sources:
+                        context = context + "\n\n" + pdf_ctx
+                        data_sources = list(data_sources) + list(pdf_sources)
+                    else:
+                        context = pdf_ctx
+                        data_sources = pdf_sources
+                    logger.info("📈 Trend query: merged property PDF context for price/market trends")
+            except Exception as e:
+                logger.debug("Trend query PDF fetch failed: %s", e)
+
         # 4️⃣ Final check - if we still don't have context, provide fallback
-        # BUT: Allow location_context with nearby properties as valid data (even if context/data_sources are empty)
+        # Last resort when we have listing_id: try location (for amenity links) and property PDF chunks (no keyword lists)
         has_location_data = location_context and location_context.get('nearby_properties_json')
-        if (not context or not data_sources) and not has_location_data:
+        has_last_resort_data = False
+        if (not context or not data_sources) and not has_location_data and listing_id:
+            try:
+                from app.db.postgres.repositories.listing_repository import ListingRepository
+                async_session_maker = get_session_maker()
+                async with async_session_maker() as db_session:
+                    listing_repo = ListingRepository(db_session)
+                    loc = await listing_repo.get_listing_location(listing_id)
+                    if loc and loc.get('latitude') is not None and loc.get('longitude') is not None:
+                        if not location_context:
+                            location_context = {}
+                        location_context['latitude'] = loc.get('latitude')
+                        location_context['longitude'] = loc.get('longitude')
+                        context = (
+                            "The user is asking about nearby amenities. Use the Google Maps links provided below."
+                        )
+                        has_last_resort_data = True
+                        logger.info("🗺️  Last resort: listing has coordinates → will add amenity links")
+            except Exception as e:
+                logger.debug("Last resort location fetch failed: %s", e)
+
+            if not has_last_resort_data:
+                pdf_ctx, pdf_sources, _ = await self.augmenter.augment_query_pdf_chunks(
+                    query=query, listing_id=listing_id, n_results=5
+                )
+                if pdf_ctx and pdf_ctx.strip() and pdf_sources:
+                    context = pdf_ctx
+                    data_sources = pdf_sources
+                    has_last_resort_data = True
+                    logger.info("🗺️  Last resort: got property PDF context → will answer from PDF")
+
+        if (not context or not data_sources) and not has_location_data and not has_last_resort_data:
             # Final fallback - no data from either source
             logger.info("⚠️  No data found in property or generic stores → providing fallback message")
             if is_enquiry_message:
@@ -814,13 +885,17 @@ class ResponseGenerator:
                     "This is an automated email. We don't have enough information to answer this enquiry "
                     "right now, but we will get back to you shortly."
                 )
+            elif is_trend_query:
+                answer = (
+                    "I don't have price or market trend data for this area in the listing documents. "
+                    "For a detailed market report, please contact the agent or Unreserved. "
+                    "I can help with this property's asking price, features, inspections, and location."
+                )
             else:
                 answer = (
-                    "I don't have detailed information on that topic. "
-                    "For property-specific questions, please contact the vendor or listing agent. "
-                    "For questions about real estate law, licensing, or processes in Victoria, "
-                    "I recommend consulting with a qualified professional such as a lawyer, "
-                    "licensed real estate agent, or Consumer Affairs Victoria (CAV)."
+                    "I don't have sufficient information in the available listing data "
+                    "to answer this fully.\n\n"
+                    "Please contact the Unreserved Admin for more information."
                 )
             
             ai_response = sanitize_response(
@@ -860,7 +935,7 @@ class ResponseGenerator:
         enquiry_type = detect_enquiry_type(query)
         
         if enquiry_type == "personal_advice":
-            answer = self._generate_personal_advice_message(query)
+            answer = await self._generate_personal_advice_message(query)
             return self._create_response_dict(
                 answer=answer,
                 needs_vendor_contact=True,
@@ -872,7 +947,9 @@ class ResponseGenerator:
             )
 
         # 4️⃣ Check if this is an invalid/irrelevant amenity query (check BEFORE valid amenity check)
-        if is_invalid_amenity_query(query):
+        # Skip for inspection queries: "closest to be booked" contains "close" + "book" and would false-positive
+        is_inspection_query = listing_id and any(kw in query.lower() for kw in INSPECTION_QUERY_KEYWORDS)
+        if not is_inspection_query and is_invalid_amenity_query(query):
             logger.info("⚠️  Invalid/irrelevant amenity query detected: '%s'", query)
 
             # For enquiry messages, treat low-confidence amenity queries as "no data" and use
@@ -924,21 +1001,26 @@ class ResponseGenerator:
         
         # 5️⃣ Get listing activity metrics for tone adaptation
         # IMPORTANT: Only fetch activity metrics (and compute tone) for PROPERTY queries.
-        # For GENERIC knowledge queries (laws, processes, training PDFs), we skip
-        # all activity/tone work to avoid unnecessary DB calls and side effects.
+        # Only apply tone when the user is being sufficiently conversational (7+ questions).
         listing_activity_data = None
         tone_level = ToneLevel.NEUTRAL
         tone_context = ""
-        
-        if query_source == "property" and listing_id:
+        user_msg_count = sum(
+            1 for m in (conversation_history or [])
+            if str(m.get("role", "")).lower() == "user"
+        )
+        total_user_messages = user_msg_count + 1  # include current query
+        is_conversational_enough = total_user_messages >= TONE_ADAPTATION_MIN_USER_MESSAGES
+
+        if query_source == "property" and listing_id and is_conversational_enough:
             try:
-                from app.db.session import SessionLocal
+                
                 from app.db.postgres.repositories.listing_activity_repository import ListingActivityRepository
                 
-                db_session = SessionLocal()
-                try:
+                async_session_maker = get_session_maker()
+                async with async_session_maker() as db_session:
                     activity_repo = ListingActivityRepository(db_session)
-                    listing_activity_data = activity_repo.get_activity_dict(listing_id)
+                    listing_activity_data = await activity_repo.get_activity_dict(listing_id)
                     
                     if listing_activity_data:
                         logger.info("🎭 Fetching tone adaptation for listing %s", listing_id)
@@ -961,14 +1043,19 @@ class ResponseGenerator:
                             "🎭 No activity data found for listing %s → using NEUTRAL tone",
                             listing_id,
                         )
-                finally:
-                    db_session.close()
+         
             except Exception as e:
                 logger.exception(
                     "⚠️  Failed to get listing activity metrics: %s: %s",
                     type(e).__name__,
                     e,
                 )
+        elif query_source == "property" and listing_id and not is_conversational_enough:
+            logger.debug(
+                "🎭 Skipping tone adaptation: user messages=%d (need >=%d to be conversational)",
+                total_user_messages,
+                TONE_ADAPTATION_MIN_USER_MESSAGES,
+            )
         else:
             logger.debug(
                 "🎭 Skipping activity metrics/tone adaptation (query_source=%s, listing_id=%s)",
@@ -976,68 +1063,44 @@ class ResponseGenerator:
                 listing_id,
             )
         
-        # 5.5️⃣ Check if this is an amenity query (to pass has_amenity_links flag)
-        # We need to check this BEFORE creating the prompt so the LLM knows to mention the link
-        # IMPORTANT: For pure pricing questions, we do NOT want amenity links at all.
-        # IMPORTANT: For generic knowledge queries, we do NOT want amenity links at all.
+        # 5.5️⃣ Google Maps links: create whenever the listing has latitude and longitude
         has_amenity_links_flag = False
-        if query_source != 'generic' and enquiry_type != "price" and is_amenity_query(query):
-            # Try to get location from location_context first
-            latitude = None
-            longitude = None
-            
-            if location_context:
-                latitude = location_context.get('latitude')
-                longitude = location_context.get('longitude')
-            
-            # Fallback: If location_context is None but we have listing_id, fetch location from database
-            if (latitude is None or longitude is None) and listing_id:
-                logger.info(
-                    "🗺️  Location not in context, fetching from database for listing_id: %s",
+        latitude = None
+        longitude = None
+
+        if location_context:
+            latitude = location_context.get('latitude')
+            longitude = location_context.get('longitude')
+
+        if (latitude is None or longitude is None) and listing_id:
+            try:
+                from app.db.postgres.repositories.listing_repository import ListingRepository
+                async_session_maker = get_session_maker()
+                async with async_session_maker() as db_session:
+                    listing_repo = ListingRepository(db_session)
+                    location_data = await listing_repo.get_listing_location(listing_id)
+                    if location_data:
+                        latitude = location_data.get('latitude')
+                        longitude = location_data.get('longitude')
+                        if location_context is None:
+                            location_context = {}
+                        location_context['latitude'] = latitude
+                        location_context['longitude'] = longitude
+            except Exception as e:
+                logger.warning(
+                    "⚠️  Failed to fetch location for listing %s: %s",
                     listing_id,
+                    e,
                 )
-                try:
-                    from app.db.postgres.repositories.listing_repository import ListingRepository
-                    from app.db.session import SessionLocal
-                    
-                    db_session = SessionLocal()
-                    try:
-                        listing_repo = ListingRepository(db_session)
-                        location_data = listing_repo.get_listing_location(listing_id)
-                        
-                        if location_data:
-                            latitude = location_data.get('latitude')
-                            longitude = location_data.get('longitude')
-                            logger.debug(
-                                "   → Fetched location from DB: lat=%s, lng=%s",
-                                latitude,
-                                longitude,
-                            )
-                            
-                            # Update location_context if it exists, or create it
-                            if location_context is None:
-                                location_context = {}
-                            location_context['latitude'] = latitude
-                            location_context['longitude'] = longitude
-                    finally:
-                        db_session.close()
-                except Exception as e:
-                    logger.warning(
-                        "⚠️  Failed to fetch location from database for %s: %s: %s",
-                        listing_id,
-                        type(e).__name__,
-                        e,
-                    )
-            
-            if latitude and longitude:
-                has_amenity_links_flag = True
-                logger.info(
-                    "🗺️  Amenity query detected - will generate links and include reference in response",
-                )
-        
-        # 5.5️⃣ Generate amenity links BEFORE prompt creation (so we can include them in the prompt)
+
+        # Only add amenity links when the query is about amenities (schools, hospitals, bars, etc.),
+        # not for price trends, inspections, or other non-amenity questions.
+        if latitude is not None and longitude is not None and is_amenity_query(query):
+            has_amenity_links_flag = True
+
+        # Generate amenity links only when the query is amenity-related
         pre_generated_amenity_links = []
-        if has_amenity_links_flag and latitude and longitude:
+        if has_amenity_links_flag and latitude is not None and longitude is not None:
             logger.info(
                 "🗺️  Pre-generating amenity links for prompt (lat: %s, lng: %s)",
                 latitude,
@@ -1094,7 +1157,7 @@ class ResponseGenerator:
         if context and is_amenity_query(query) and query_source == 'property':
             ql = query.lower()
             if "school" in ql or "schools" in ql:
-                school_lines = self._extract_school_lines_from_context(context)
+                school_lines = await self._extract_school_lines_from_context(context)
                 if school_lines:
                     schools_block = "\n\n=== SCHOOLS MENTIONED IN LISTING DATA ===\n" + "\n".join(
                         f"- {line}" for line in school_lines
@@ -1127,6 +1190,13 @@ class ResponseGenerator:
                 tone_level.value,
                 bool(tone_context),
             )
+
+        # Inject live inspection slots from listing_inspections when query is about inspections
+        if listing_id and any(kw in query.lower() for kw in INSPECTION_QUERY_KEYWORDS):
+            inspection_context = await self._get_listing_inspection_context(listing_id)
+            if inspection_context:
+                context = (context or "") + "\n\n" + inspection_context
+                logger.info("📅 Injected inspection slots from listing_inspections into context")
         
         # 6️⃣ Prompt creation
         # DEBUG: Log context before prompt creation
@@ -1194,7 +1264,7 @@ class ResponseGenerator:
         except Exception as e:
             logger.exception("❌ LLM ERROR: %s", e)
 
-            error_type = self._classify_llm_error(e)
+            error_type = classify_llm_error(e)
 
             if error_type == "rate_limit":
                 rate_limit_error = True
@@ -1323,14 +1393,18 @@ class ResponseGenerator:
         final_amenity_links = pre_generated_amenity_links if has_amenity_links_flag else []
 
         # 🔟 Extract nearby properties from location_context
-        # ONLY include nearby properties if the user explicitly asked about them
+        # ONLY include nearby properties (active listings) when user asked about "nearby properties" (for sale).
+        # For "nearby SOLD" / comparable sales, keep empty - answer comes from PDF, not the active listings list.
         nearby_properties_json = []
         if location_context:
-            # Check if query is asking about nearby properties
             from app.services.rag_pipeline.location_utils import detect_location_query
             is_location_query, query_type = detect_location_query(query)
-            
-            if is_location_query and query_type == 'nearby_properties':
+            query_lower = query.lower()
+            is_comparable_sold = any(
+                term in query_lower for term in
+                ("sold", "comparable", "recent sale", "recent sales", "properties sold")
+            )
+            if is_location_query and query_type == 'nearby_properties' and not is_comparable_sold:
                 nearby_properties_json = location_context.get('nearby_properties_json', [])
                 if nearby_properties_json:
                     logger.info(
@@ -1339,8 +1413,9 @@ class ResponseGenerator:
                     )
             else:
                 logger.debug(
-                    "✅ User did not ask about nearby properties - excluding from response (query_type: %s)",
+                    "✅ Excluding nearby_properties from response (query_type: %s, is_comparable_sold: %s)",
                     query_type,
+                    is_comparable_sold,
                 )
 
         now = time.perf_counter()
@@ -1350,6 +1425,43 @@ class ResponseGenerator:
                 timings_breakdown[f"retrieval_{k}"] = round(v, 2)
         except Exception:
             pass
+        # If LLM claimed no nearby properties but we actually have some, patch the answer
+        # NOTE: Only do this for generic \"nearby properties\" queries – for \"nearby sold\" /
+        # comparable sales questions we rely on property PDF content instead.
+        try:
+            query_lower = query.lower()
+            if (
+                nearby_properties_json
+                and "nearby" in query_lower
+                and not any(term in query_lower for term in ["sold", "comparable", "recent sale", "recent sales"])
+            ):
+                ans_lower = (ai_response.answer or "").lower()
+                if "don't have information about nearby properties" in ans_lower:
+                    # Build a concise deterministic summary from nearby_properties_json
+                    snippets = []
+                    for prop in nearby_properties_json[:3]:
+                        title = prop.get("title") or prop.get("slug") or "nearby property"
+                        address = prop.get("address") or ""
+                        distance = prop.get("distance") or ""
+                        bedrooms = prop.get("bedrooms")
+                        bathrooms = prop.get("bathrooms")
+                        parts = []
+                        if distance:
+                            parts.append(f"{distance} away")
+                        if address:
+                            parts.append(address)
+                        if bedrooms is not None and bathrooms is not None:
+                            parts.append(f"{bedrooms} bed, {bathrooms} bath")
+                        snippet = " - ".join(p for p in parts if p)
+                        if snippet:
+                            snippets.append(f"- {title}: {snippet}")
+                    if snippets:
+                        intro = f"I've found {len(nearby_properties_json)} nearby properties for this location. Here are some of them:\n"
+                        ai_response.answer = intro + "\n".join(snippets)
+        except Exception:
+            # Never let post-processing errors break the main response
+            pass
+
         eval_timings = {
             "retrieval_ms": (t_llm_start - t_start) * 1000.0 if t_llm_start is not None else 0.0,
             "llm_ms": (now - t_llm_start) * 1000.0 if t_llm_start is not None else 0.0,
@@ -1367,6 +1479,35 @@ class ResponseGenerator:
     # ------------------------------------------------------------------
     # HELPER METHODS
     # ------------------------------------------------------------------
+    async def _get_listing_inspection_context(self, listing_id: str) -> str:
+        """
+        Fetch inspection slots for a listing from listing_inspections and format for LLM context.
+        Returns empty string if none found or on error.
+        """
+        try:
+            from app.db.postgres.repositories.listing_repository import ListingRepository
+            from app.db.connection import get_session_maker
+            session_maker = get_session_maker()
+            async with session_maker() as db:
+                repo = ListingRepository(db)
+                inspections = await repo._fetch_inspections(listing_id)
+            if not inspections:
+                return ""
+            lines = ["Inspection slots for this listing (from listing_inspections):"]
+            for i, insp in enumerate(inspections, 1):
+                cancelled = insp.get("isCancelled") if isinstance(insp.get("isCancelled"), bool) else False
+                date = insp.get("inspectionDate") or ""
+                start = insp.get("inspectionStartTime") or ""
+                end = insp.get("inspectionEndTime") or ""
+                if cancelled:
+                    lines.append(f"  {i}. {date} {start}-{end} (CANCELLED)")
+                else:
+                    lines.append(f"  {i}. {date} {start}-{end}")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning("Failed to fetch inspection slots for listing %s: %s", listing_id, e)
+            return ""
+
     def _create_response_dict(
         self,
         answer: str,
@@ -1425,7 +1566,7 @@ class ResponseGenerator:
             "amenity_links": amenity_links or [],
         }
 
-    def _extract_school_lines_from_context(self, context: str) -> List[str]:
+    async def _extract_school_lines_from_context(self, context: str) -> List[str]:
         """
         Best-effort extraction of school names (and optional distances) from listing context.
         This is used to make responses deterministic for school questions without inventing data.
@@ -1463,7 +1604,7 @@ class ResponseGenerator:
 
         return lines
 
-    def _generate_conversational_reply(
+    async def _generate_conversational_reply(
         self,
         query: str,
         conversation_history: Optional[List[Dict[str, str]]] = None,
@@ -1487,7 +1628,7 @@ class ResponseGenerator:
         )
         return (response.choices[0].message.content or "").strip()
 
-    def _classify_intent_listing_vs_conversational(
+    async def _classify_intent_listing_vs_conversational(
         self,
         query: str,
         conversation_history: Optional[List[Dict[str, str]]] = None,
@@ -1517,7 +1658,7 @@ class ResponseGenerator:
         except Exception:
             return "listing"
 
-    def _generate_personal_advice_message(self, query: str) -> str:
+    async def _generate_personal_advice_message(self, query: str) -> str:
         return (
             "I cannot provide personal advice, recommendations, or suggestions about whether to buy, "
             "purchase, invest in, or make offers on properties. These decisions require assessment by "
@@ -1582,7 +1723,7 @@ class ResponseGenerator:
         messages.append({"role": "user", "content": user_prompt})
         return messages
 
-    def _generate_vendor_contact_message(
+    async def _generate_vendor_contact_message(
         self, query: str, reason: Optional[str] = None, is_enquiry_message: bool = False
     ) -> str:
         # IMPORTANT (privacy/UX): never surface internal retrieval reasons to end users.
