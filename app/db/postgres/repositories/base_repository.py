@@ -1,10 +1,10 @@
 """
 Base repository pattern for database operations.
-Provides common CRUD operations and database session management.
+Provides common CRUD operations and async database session management.
 """
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from typing import Generic, TypeVar, Type, Optional, List, Dict, Any
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -20,48 +20,45 @@ class BaseRepository(Generic[ModelType]):
     All methods automatically handle transaction rollback on errors.
     """
     
-    def __init__(self, model: Type[ModelType], session: Session):
+    def __init__(self, model: Type[ModelType], session: AsyncSession):
         """
         Initialize repository with model and session.
         
         Args:
             model: SQLAlchemy model class
-            session: Database session
+            session: Async database session
         """
         self.model = model
         self.session = session
     
-    @contextmanager
-    def _handle_errors(self, auto_commit_read: bool = True):
+    @asynccontextmanager
+    async def _handle_errors(self, auto_commit_read: bool = True):
         """
-        Context manager for automatic error handling and transaction cleanup.
+        Async context manager for automatic error handling and transaction cleanup.
         
         Args:
             auto_commit_read: If True, commits read-only operations to prevent idle transactions
         
         Usage:
-            with self._handle_errors():
+            async with self._handle_errors():
                 # database operations
         """
         try:
             yield
-            # ✅ CRITICAL: Always commit to close the transaction
+            # Always commit to close the transaction
             # This prevents "idle in transaction" state even for read-only queries
             if auto_commit_read and not self.session.in_transaction():
-                # Transaction already committed/rolled back by explicit code
                 pass
             elif auto_commit_read:
-                # Commit to close the transaction (safe for reads and writes)
-                self.session.commit()
+                await self.session.commit()
         except SQLAlchemyError as e:
-            self.session.rollback()
+            await self.session.rollback()
             raise e
         except Exception as e:
-            # Rollback on any error to ensure transaction is closed
-            self.session.rollback()
+            await self.session.rollback()
             raise e
     
-    def get_by_id(self, id: Any) -> Optional[ModelType]:
+    async def get_by_id(self, id: Any) -> Optional[ModelType]:
         """
         Get a single record by ID.
         
@@ -71,10 +68,10 @@ class BaseRepository(Generic[ModelType]):
         Returns:
             Model instance or None
         """
-        with self._handle_errors():
-            return self.session.get(self.model, id)
+        async with self._handle_errors():
+            return await self.session.get(self.model, id)
     
-    def get_all(self, limit: Optional[int] = None, offset: Optional[int] = None) -> List[ModelType]:
+    async def get_all(self, limit: Optional[int] = None, offset: Optional[int] = None) -> List[ModelType]:
         """
         Get all records with optional pagination.
         
@@ -85,16 +82,16 @@ class BaseRepository(Generic[ModelType]):
         Returns:
             List of model instances
         """
-        with self._handle_errors():
+        async with self._handle_errors():
             query = select(self.model)
             if offset:
                 query = query.offset(offset)
             if limit:
                 query = query.limit(limit)
-            result = self.session.execute(query)
+            result = await self.session.execute(query)
             return list(result.scalars().all())
     
-    def get_by_filter(self, filters: Dict[str, Any], limit: Optional[int] = None) -> List[ModelType]:
+    async def get_by_filter(self, filters: Dict[str, Any], limit: Optional[int] = None) -> List[ModelType]:
         """
         Get records matching filters.
         
@@ -108,7 +105,7 @@ class BaseRepository(Generic[ModelType]):
         Raises:
             AttributeError: If filter key doesn't exist on model
         """
-        with self._handle_errors():
+        async with self._handle_errors():
             query = select(self.model)
             for key, value in filters.items():
                 if not hasattr(self.model, key):
@@ -116,10 +113,10 @@ class BaseRepository(Generic[ModelType]):
                 query = query.where(getattr(self.model, key) == value)
             if limit:
                 query = query.limit(limit)
-            result = self.session.execute(query)
+            result = await self.session.execute(query)
             return list(result.scalars().all())
     
-    def create(self, **kwargs) -> ModelType:
+    async def create(self, **kwargs) -> ModelType:
         """
         Create a new record.
         
@@ -134,14 +131,14 @@ class BaseRepository(Generic[ModelType]):
             should be handled by the model's __init__ method or in specialized
             repository subclasses, not in this base class.
         """
-        with self._handle_errors():
+        async with self._handle_errors():
             instance = self.model(**kwargs)
             self.session.add(instance)
-            self.session.commit()
-            self.session.refresh(instance)
+            await self.session.commit()
+            await self.session.refresh(instance)
             return instance
     
-    def update(self, id: Any, **kwargs) -> Optional[ModelType]:
+    async def update(self, id: Any, **kwargs) -> Optional[ModelType]:
         """
         Update a record by ID.
         
@@ -152,8 +149,8 @@ class BaseRepository(Generic[ModelType]):
         Returns:
             Updated model instance or None if not found
         """
-        with self._handle_errors():
-            instance = self.get_by_id(id)
+        async with self._handle_errors():
+            instance = await self.get_by_id(id)
             if not instance:
                 return None
             
@@ -163,11 +160,11 @@ class BaseRepository(Generic[ModelType]):
                 else:
                     raise AttributeError(f"Model {self.model.__name__} has no attribute '{key}'")
             
-            self.session.commit()
-            self.session.refresh(instance)
+            await self.session.commit()
+            await self.session.refresh(instance)
             return instance
     
-    def delete(self, id: Any) -> bool:
+    async def delete(self, id: Any) -> bool:
         """
         Delete a record by ID.
         
@@ -177,16 +174,16 @@ class BaseRepository(Generic[ModelType]):
         Returns:
             True if deleted, False if not found
         """
-        with self._handle_errors():
-            instance = self.get_by_id(id)
+        async with self._handle_errors():
+            instance = await self.get_by_id(id)
             if not instance:
                 return False
             
-            self.session.delete(instance)
-            self.session.commit()
+            await self.session.delete(instance)
+            await self.session.commit()
             return True
     
-    def count(self, filters: Optional[Dict[str, Any]] = None) -> int:
+    async def count(self, filters: Optional[Dict[str, Any]] = None) -> int:
         """
         Count records matching filters.
         
@@ -196,7 +193,7 @@ class BaseRepository(Generic[ModelType]):
         Returns:
             Number of matching records
         """
-        with self._handle_errors():
+        async with self._handle_errors():
             query = select(func.count()).select_from(self.model)
             
             if filters:
@@ -205,10 +202,10 @@ class BaseRepository(Generic[ModelType]):
                         raise AttributeError(f"Model {self.model.__name__} has no attribute '{key}'")
                     query = query.where(getattr(self.model, key) == value)
             
-            result = self.session.execute(query)
+            result = await self.session.execute(query)
             return result.scalar() or 0
     
-    def exists(self, filters: Dict[str, Any]) -> bool:
+    async def exists(self, filters: Dict[str, Any]) -> bool:
         """
         Check if a record exists matching filters.
         
@@ -218,5 +215,4 @@ class BaseRepository(Generic[ModelType]):
         Returns:
             True if exists, False otherwise
         """
-        return self.count(filters) > 0
-
+        return await self.count(filters) > 0

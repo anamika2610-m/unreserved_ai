@@ -3,7 +3,6 @@ Database session management for SQLAlchemy.
 
 Provides engine, session factory, and FastAPI dependency for database connections.
 """
-import os
 import time
 from typing import Generator, Optional
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
@@ -12,52 +11,28 @@ from sqlalchemy import create_engine, text, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError, DisconnectionError
 from sqlalchemy.orm import Session, sessionmaker
-from pydantic_settings import BaseSettings
+from app.core.settings import get_database_url as core_get_database_url, settings as app_settings
+from sqlalchemy.pool import QueuePool, NullPool
 import psycopg
 
 
 # Constants
 CONNECT_TIMEOUT = 60  # seconds (increased for remote databases that may be sleeping)
-POOL_RECYCLE = 300  # 5 minutes
-POOL_SIZE = 5
-MAX_OVERFLOW = 10
-POOL_TIMEOUT = 120  # seconds (increased for slow connections)
+POOL_RECYCLE = app_settings.db_pool_recycle  # default 5 minutes
+POOL_SIZE = app_settings.db_pool_size
+MAX_OVERFLOW = app_settings.db_max_overflow
+POOL_TIMEOUT = app_settings.db_pool_timeout  # seconds (increased for slow connections)
 MAX_RETRIES = 3
 INITIAL_RETRY_DELAY = 2  # seconds (increased initial delay)
 
 
-class DatabaseSettings(BaseSettings):
-    """Database configuration settings."""
-    database_url: str = ""
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-        extra = "ignore"
-
-
-def _get_database_url() -> str:
+def get_database_url() -> str:
     """
-    Get database URL from environment or .env file.
-    
-    Returns:
-        Database connection URL
-        
-    Raises:
-        ValueError: If DATABASE_URL is not set
+    Public helper to get the database URL.
+
+    Delegates to the central app.core.settings module.
     """
-    database_url = os.getenv("DATABASE_URL")
-    if not database_url:
-        settings = DatabaseSettings()
-        database_url = settings.database_url
-    
-    if not database_url:
-        raise ValueError(
-            "DATABASE_URL is not set. Please set it in your .env file or environment variables.\n"
-            "Example: DATABASE_URL=postgresql://user:pass@host:5432/dbname"
-        )
-    
-    return database_url
+    return core_get_database_url()
 
 
 def _normalize_database_url(url: str) -> str:
@@ -132,21 +107,43 @@ def _build_connect_args(url: str) -> dict:
 
 
 # Initialize database URL
-database_url = _get_database_url()
+database_url = get_database_url()
 normalized_url = _normalize_database_url(database_url)
 connect_args = _build_connect_args(normalized_url)
+
+
+def get_engine_kwargs() -> dict:
+    """
+    Get engine configuration kwargs.
+
+    This mirrors the structure of the standard connection module
+    while keeping the current behaviour and settings unchanged.
+    """
+    base_kwargs = {
+        "pool_pre_ping": True,  # Test connections before using
+        "pool_recycle": POOL_RECYCLE,
+        "pool_size": POOL_SIZE,
+        "max_overflow": MAX_OVERFLOW,
+        "connect_args": connect_args,
+        "pool_timeout": POOL_TIMEOUT,
+        "pool_reset_on_return": "rollback",
+        "echo": app_settings.db_echo,
+    }
+
+    # Optional: allow using NullPool in non-production environments.
+    # By default this is disabled to preserve existing behaviour.
+    if app_settings.app_env.lower() != "production" and app_settings.db_use_nullpool_in_dev:
+        base_kwargs["poolclass"] = NullPool
+    else:
+        base_kwargs["poolclass"] = QueuePool
+
+    return base_kwargs
+
 
 # Create SQLAlchemy engine
 engine: Engine = create_engine(
     normalized_url,
-    pool_pre_ping=True,  # Test connections before using
-    pool_recycle=POOL_RECYCLE,
-    pool_size=POOL_SIZE,
-    max_overflow=MAX_OVERFLOW,
-    connect_args=connect_args,
-    pool_timeout=POOL_TIMEOUT,
-    pool_reset_on_return='rollback',
-    echo=False,
+    **get_engine_kwargs(),
 )
 
 # Configure PostgreSQL session-level timeouts to prevent idle transactions
@@ -191,6 +188,26 @@ SessionLocal: sessionmaker[Session] = sessionmaker(
     autoflush=False,
     bind=engine,
 )
+
+
+def get_engine() -> Engine:
+    """
+    Get the sync SQLAlchemy engine instance.
+
+    Provided for API parity with the standard connection module
+    (which exposes a getter), without changing existing usage.
+    """
+    return engine
+
+
+def get_session_maker() -> sessionmaker[Session]:
+    """
+    Get the sync sessionmaker factory.
+
+    This mirrors the standard connection module's session-maker getter
+    but still returns the existing SessionLocal.
+    """
+    return SessionLocal
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -280,4 +297,30 @@ def get_db() -> Generator[Session, None, None]:
             db.close()
         except:
             pass
+
+
+def close_db():
+    """Close database connections (dispose pool). Call on application shutdown."""
+    if engine is not None:
+        engine.dispose()
+
+
+def check_db_connection() -> bool:
+    """Check database connection health. Returns True if healthy, False otherwise."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception as e:
+        print(f"Database health check failed: {e}")
+        return False
+
+
+def init_db():
+    """
+    Initialize database tables.
+    In production, use Alembic migrations instead; this is a no-op placeholder.
+    """
+    # Tables are created by migration scripts; no-op here.
+    pass
 

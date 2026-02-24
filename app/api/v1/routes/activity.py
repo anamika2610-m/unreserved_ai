@@ -4,13 +4,15 @@ No tracking endpoints needed - metrics are calculated on-the-fly.
 """
 import app.config  # noqa: F401
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends
+
+from app.core.exceptions import InternalServerError
 from pydantic import BaseModel, Field
 from uuid import UUID
 
-from app.db.session import get_db
+from app.db.connection import get_db
 from app.db.postgres.repositories.listing_activity_repository import ListingActivityRepository
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 # ------------------------------------------------------------------------------
@@ -43,7 +45,7 @@ class ActivityMetricsResponse(BaseModel):
 @router.get("/metrics/{listing_id}", response_model=ActivityMetricsResponse)
 async def get_activity_metrics(
     listing_id: UUID,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Get activity metrics and current tone level for a listing.
@@ -61,7 +63,7 @@ async def get_activity_metrics(
         activity_repo = ListingActivityRepository(db)
         tone_service = ToneAdaptationService()
         
-        activity_data = activity_repo.get_activity_dict(listing_id)
+        activity_data = await activity_repo.get_activity_dict(listing_id)
         
         if not activity_data:
             # Return zero metrics if listing not found
@@ -96,7 +98,4 @@ async def get_activity_metrics(
             tone_context=tone_context,
         )
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error retrieving activity metrics: {str(e)}",
-        )
+        raise InternalServerError(detail=f"Error retrieving activity metrics: {str(e)}")

@@ -50,6 +50,12 @@ QUESTION_WORDS = [
     'can', 'do', 'does', 'is', 'are', 'will', 'would'
 ]
 
+# When listing_id is set, queries matching these patterns ask "what does this listing provide?"
+# → route to PROPERTY so we search listing data/documents first (not generic knowledge).
+LISTING_WHAT_PROVIDED_PATTERNS = [
+    r'\b(?:what|which)\s+(?:market\s+)?(?:insights?|information|data|details?)\s+(?:are\s+)?provided\b',
+]
+
 
 def extract_listing_id(query: str) -> Optional[str]:
     """
@@ -520,6 +526,11 @@ def detect_query_source(
         else:
             print(f"⚠️  No conversation history provided for follow-up")
     
+    # When user has a listing and asks what this listing provides → search property first
+    if listing_id and any(re.search(p, query_lower) for p in LISTING_WHAT_PROVIDED_PATTERNS):
+        print(f"✅ Query asks what is provided for this listing → routing to PROPERTY")
+        return 'property'
+
     # HYBRID APPROACH: Fast regex check first, LLM for ambiguous cases
     # Step 1: Check obvious cases with regex (fast, handles 90% of queries)
     if _is_obviously_generic(query_lower):
@@ -607,7 +618,6 @@ def detect_query_source(
         r'\bact\s+\d{4}\b',  # Matches "Act 1962", "Act 1980", etc.
         r'\bact\s+of\s+\d{4}\b',  # Matches "Act of 1962"
     ]
-    import re
     for pattern in act_patterns:
         if re.search(pattern, query_lower):
             print(f"✅ Found Act pattern → routing to GENERIC")

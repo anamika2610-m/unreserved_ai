@@ -158,7 +158,7 @@ def test_save_summary(listing_id: UUID, summary: str):
         
         print(f"✅ Summary saved to database")
         print(f"   Summary ID: {saved_summary.id}")
-        print(f"   Listing ID: {saved_summary.lisitng_id}")
+        print(f"   Listing ID: {saved_summary.listing_id}")
         print(f"   Last summarized at: {saved_summary.last_summarised_at}")
         print(f"   Created at: {saved_summary.created_at}")
         

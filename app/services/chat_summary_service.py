@@ -191,36 +191,22 @@ class ChatSummaryService:
         
         context = "\n".join(context_parts)
         
-        # Create LLM prompt
-        system_prompt = """You are an assistant that generates high-level summaries of user queries 
-for property listings. Your summaries should:
-1. Focus on PROPERTY FEATURES that buyers are asking about (bedrooms, bathrooms, amenities, etc.)
-2. Identify DESIRED FEATURES that buyers are looking for (what they want, need, prefer)
-3. Highlight trends and patterns in buyer interest
-4. Provide insights about what features buyers care most about
-5. Be concise, informative, and directly to the point
-6. NEVER mention specific user IDs or individual conversations
-7. Focus on aggregate patterns and trends, especially property features and desired features
-8. Avoid repeating the same idea in different words; each insight should appear once
+        # Create LLM prompt – concise, pointwise, no repetition or exaggeration
+        system_prompt = """You are an assistant that generates brief, pointwise summaries of buyer interest for property listings.
 
-Generate a professional, medium-length summary (roughly 120–200 words) that helps administrators
-quickly understand what property features buyers are interested in and what they're looking for."""
+RULES:
+- Output ONLY bullet points (one line per point). No paragraphs or prose.
+- Maximum 6–8 bullets. Each bullet is one short fact (under 15 words).
+- State each insight once. Do not repeat or rephrase the same point.
+- Be factual and neutral. Do not exaggerate or use marketing language.
+- Focus on: features asked about (bedrooms, price, amenities, etc.), common questions, and what buyers seem to care about.
+- Never mention user IDs or individual conversations."""
 
-        user_prompt = f"""Based on the following conversation analysis for a property listing, 
-generate a concise but informative summary that identifies buyer interest patterns and common themes.
+        user_prompt = f"""Conversation analysis for this listing:
 
 {context}
 
-Generate a summary that:
-- Focuses on PROPERTY FEATURES buyers are asking about (bedrooms, bathrooms, amenities, size, etc.)
-- Identifies DESIRED FEATURES buyers are looking for (what they want, need, prefer)
-- Highlights trends in buyer interest patterns related to property features
-- Provides insights about which features buyers care most about
-- Notes what property information might be missing or needs clarification, if any
-- Is written in a professional, administrative tone
-
-Keep the summary to 1–2 short paragraphs (roughly 120–200 words).
-Avoid repeating the same information in different wording."""
+Write a brief, pointwise summary (bullet list only, 6–8 points max). One fact per bullet. No repetition. No exaggeration."""
 
         try:
             messages = [
@@ -230,8 +216,8 @@ Avoid repeating the same information in different wording."""
             
             response = create_chat_completion(
                 messages=messages,
-                temperature=0.5,  # Slightly higher for more natural summaries
-                max_tokens=500,
+                temperature=0.3,
+                max_tokens=250,
             )
             
             summary = response.choices[0].message.content.strip()
@@ -330,27 +316,14 @@ Avoid repeating the same information in different wording."""
         }
 
     def _generate_fallback_summary(self, analysis: Dict[str, Any]) -> str:
-        """
-        Generate a template-based summary if LLM generation fails.
-        """
+        """Generate a brief, pointwise summary if LLM fails."""
         total = analysis["total_queries"]
         categories = analysis.get("query_categories", {})
-
-        summary_parts = [
-            f"{total} user queries have been recorded for this listing.",
-        ]
-
+        lines = [f"• {total} user queries recorded for this listing."]
         if categories:
-            top_category = max(categories.items(), key=lambda x: x[1])
-            summary_parts.append(
-                f"The most common topic is {top_category[0]} with {top_category[1]} queries."
-            )
-
+            top = max(categories.items(), key=lambda x: x[1])
+            lines.append(f"• Most common topic: {top[0]} ({top[1]} queries).")
         if analysis.get("frequent_questions"):
-            top_q = analysis["frequent_questions"][0]
-            summary_parts.append(
-                f"The most frequently asked question pattern is '{top_q['pattern']}' "
-                f"(asked {top_q['count']} times)."
-            )
-
-        return " ".join(summary_parts)
+            q = analysis["frequent_questions"][0]
+            lines.append(f"• Frequent question: \"{q['pattern']}\" ({q['count']}x).")
+        return "\n".join(lines)

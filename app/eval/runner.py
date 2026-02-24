@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import asyncio
 
 from app.eval.judge import LLMJudge
 from app.eval.metrics import (
@@ -112,7 +113,7 @@ def evaluate_single_example(
 
         # End-to-end latency (and pipeline retrieval/LLM breakdown from generator)
         (response, total_ms) = time_call(
-            generator.generate_response,
+            asyncio.run(generator.generate_response),
             query=query,
             listing_id=listing_id,
             conversation_history=example.get("conversation_history"),

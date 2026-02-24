@@ -6,7 +6,10 @@ Supports conversation history for context-aware responses.
 # Import config to ensure environment variables are set
 import app.config  # noqa: F401
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
+
+from app.core.exceptions import InternalServerError, NotFoundError
+from app.core.rate_limiter import rate_limit
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -15,13 +18,13 @@ from uuid import UUID
 from app.schemas import BuyerEnquiry
 from app.services.rag_pipeline.preprocess import preprocess_enquiry, detect_query_source
 from app.services.rag_pipeline.generation import ResponseGenerator
-from app.db.session import get_db
+from app.db.connection import get_db
 from app.db.postgres.repositories.conversation_repository import (
     ConversationRepository,
     MAX_MESSAGES_PER_CONVERSATION,
 )
 from app.db.models.conversation import ConversationRole
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 # ------------------------------------------------------------------------------
@@ -96,10 +99,12 @@ class ChatResponse(BaseModel):
     response_model=ChatResponse,
     response_model_exclude_none=True,
 )
+@rate_limit("60/minute")  # Per IP/user; adjust via env or override if needed
 async def chat_message(
-    request: ChatRequest,
+    request: Request,
+    body: ChatRequest,
     generator: ResponseGenerator = Depends(get_generator),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> ChatResponse:
     """
     Send a message to the property chatbot and get a response.
@@ -111,9 +116,9 @@ async def chat_message(
         # ----------------------------------------------------------
         # Extract fields from request
         # ----------------------------------------------------------
-        user_id = request.user_id
-        listing_id = request.listing_id
-        source_param = request.source
+        user_id = body.user_id
+        listing_id = body.listing_id
+        source_param = body.source
         
         # ----------------------------------------------------------
         # Detect if this is an enquiry message
@@ -136,32 +141,32 @@ async def chat_message(
         
         if user_id and not is_enquiry_message:
             # Logged-in user: Get or create conversation and fetch history
-            conversation = conversation_repo.get_or_create_conversation(
+            conversation = await conversation_repo.get_or_create_conversation(
                 user_id=user_id,
                 listing_id=listing_id,
-                conversation_id=request.conversation_id,
+                conversation_id=body.conversation_id,
             )
             
-            conversation_history = conversation_repo.get_recent_messages(
+            conversation_history = await conversation_repo.get_recent_messages(
                 conversation_id=conversation.id,
-                n_messages=MAX_MESSAGES_PER_CONVERSATION,  # Latest 100 messages (retention cap)
+                n_messages=MAX_MESSAGES_PER_CONVERSATION,
             )
             
             # Detect query type using conversation history (pass listing_id to skip LLM when on listing page)
             source = detect_query_source(
-                request.question,
+                body.question,
                 conversation_history=conversation_history,
-                listing_id=str(request.listing_id) if request.listing_id else None,
+                listing_id=str(body.listing_id) if body.listing_id else None,
             )
             is_generic_query = (source == "generic")
             
             # Store user message
-            conversation_repo.add_message(
+            await conversation_repo.add_message(
                 conversation_id=conversation.id,
                 role=ConversationRole.user,
-                content=request.question,
+                content=body.question,
                 metadata={
-                    "listing_id": str(request.listing_id) if request.listing_id else None,
+                    "listing_id": str(body.listing_id) if body.listing_id else None,
                     "query_type": "generic" if is_generic_query else "property_specific",
                 },
             )
@@ -172,14 +177,14 @@ async def chat_message(
             else:
                 print("🔓 Anonymous user - no conversation history will be saved")
             source = detect_query_source(
-                request.question,
+                body.question,
                 conversation_history=[],
-                listing_id=str(request.listing_id) if request.listing_id else None,
+                listing_id=str(body.listing_id) if body.listing_id else None,
             )
             is_generic_query = (source == "generic")
 
         enquiry = BuyerEnquiry(
-            question=request.question,
+            question=body.question,
             listing_id=listing_id,
             user_id=user_id,
         )
@@ -206,7 +211,7 @@ async def chat_message(
         final_user_id = str(enquiry_data.get("user_id")) if enquiry_data.get("user_id") else None
         final_listing_id_str = str(final_listing_id) if final_listing_id else None
         
-        result = generator.generate_response(
+        result = await generator.generate_response(
             query=enquiry_data["normalized_query"],
             listing_id=final_listing_id_str,  # None for generic/conversational, UUID string for property-specific
             user_id=final_user_id,  # Always set (UUID string or None)
@@ -225,14 +230,14 @@ async def chat_message(
         if listing_id:
             from app.db.postgres.repositories.listing_repository import ListingRepository
             listing_repo = ListingRepository(db)
-            image_url = listing_repo.get_listing_hero_image(str(listing_id))
+            image_url = await listing_repo.get_listing_hero_image(str(listing_id))
 
         # ----------------------------------------------------------
         # Store AI response (only if user_id is provided)
         # ----------------------------------------------------------
         if user_id and conversation:
             metadata = {
-                "listing_id": str(request.listing_id) if request.listing_id else None,
+                "listing_id": str(body.listing_id) if body.listing_id else None,
                 "query_type": "generic" if is_generic_query else "property_specific",
                 "needs_vendor_contact": ai_response.needs_vendor_contact,
                 "nearby_properties": nearby_properties,
@@ -248,7 +253,7 @@ async def chat_message(
             if image_url:
                 metadata["imageURL"] = image_url
             
-            conversation_repo.add_message(
+            await conversation_repo.add_message(
                 conversation_id=conversation.id,
                 role=ConversationRole.bot,
                 content=ai_response.answer,
@@ -305,10 +310,7 @@ async def chat_message(
         if os.getenv("DEBUG", "false").lower() == "true":
             detail_msg += f"\n\nFull error: {error_details}"
         
-        raise HTTPException(
-            status_code=500,
-            detail=detail_msg,
-        )
+        raise InternalServerError(detail=detail_msg)
 
 
 class ConversationHistoryResponse(BaseModel):
@@ -329,7 +331,7 @@ class ConversationHistoryResponse(BaseModel):
 async def get_conversation_history(
     user_id: UUID = Query(..., description="User ID (UUID)"),
     listing_id: UUID = Query(..., description="Listing ID (UUID)"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> ConversationHistoryResponse:
     """
     Get conversation history for a user and listing.
@@ -340,23 +342,22 @@ async def get_conversation_history(
     try:
         conversation_repo = ConversationRepository(db)
 
-        conversations = conversation_repo.get_user_conversations(
+        conversations = await conversation_repo.get_user_conversations(
             user_id=user_id,
             listing_id=listing_id,
             active_only=True,
         )
 
         if not conversations:
-            raise HTTPException(
-                status_code=404,
+            raise NotFoundError(
                 detail=f"No conversation found for user_id={user_id} and listing_id={listing_id}",
             )
 
         conversation = conversations[0]
 
-        messages = conversation_repo.get_conversation_messages(
+        messages = await conversation_repo.get_conversation_messages(
             conversation_id=conversation.id,
-            limit=MAX_MESSAGES_PER_CONVERSATION,  # Latest 100 messages
+            limit=MAX_MESSAGES_PER_CONVERSATION,
             include_metadata=True,
         )
 
@@ -369,8 +370,5 @@ async def get_conversation_history(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error retrieving conversation history: {str(e)}",
-        )
+        raise InternalServerError(detail=f"Error retrieving conversation history: {str(e)}")
 

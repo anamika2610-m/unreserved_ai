@@ -177,7 +177,8 @@ class GenericKnowledgeStore:
             return 0
         
         added_count = 0
-        
+        categories_touched = set()
+
         for chunk in chunks:
             try:
                 # Generate embedding using OpenAI
@@ -219,8 +220,12 @@ class GenericKnowledgeStore:
                     'embedding': embedding_list,
                     'metadata': metadata_json
                 })
-                
+                categories_touched.add(chunk.doc_category)
                 added_count += 1
+                logger.debug(
+                    "Embedding created/updated: generic_knowledge doc_category=%s chunk_index=%s",
+                    chunk.doc_category, chunk.chunk_index,
+                )
             
             except Exception as e:
                 logger.exception(
@@ -238,6 +243,10 @@ class GenericKnowledgeStore:
         try:
             self.db_session.commit()
             logger.info("✓ Added %d generic knowledge chunks", added_count)
+            logger.info(
+                "[EMBED] generic_knowledge: chunks=%d doc_categories=%s",
+                added_count, sorted(categories_touched),
+            )
         except Exception as e:
             logger.exception("❌ Commit failed: %s", e)
             self.db_session.rollback()

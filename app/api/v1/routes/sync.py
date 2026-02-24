@@ -7,6 +7,12 @@ import shutil
 import tempfile
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Header, UploadFile, File, Form
+
+from app.core.exceptions import (
+    BadRequestError,
+    InternalServerError,
+    UnauthorizedError,
+)
 from pydantic import BaseModel, Field
 from contextlib import contextmanager
 
@@ -137,17 +143,13 @@ def verify_webhook_secret(x_webhook_secret: Optional[str] = Header(None)):
     # Check if webhook secret is configured
     if not WEBHOOK_SECRET or WEBHOOK_SECRET == "true":
         # Secret not properly configured - either missing or set to "true" (boolean flag instead of actual secret)
-        raise HTTPException(
-            status_code=500,
+        raise InternalServerError(
             detail="Webhook secret not configured. Set WEBHOOK_SECRET environment variable."
         )
     
     # Verify the provided secret matches
     if x_webhook_secret != WEBHOOK_SECRET:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid webhook secret"
-        )
+        raise UnauthorizedError(detail="Invalid webhook secret")
 
 
 def perform_sync(
@@ -226,7 +228,7 @@ async def _sync_listings_handler(
         )
         return SyncResponse(**result)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
+        raise InternalServerError(detail=f"Sync failed: {str(e)}")
 
 
 @router.post("/listings", response_model=SyncResponse)
@@ -338,15 +340,12 @@ async def get_sync_status():
         )
         
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to get status: {str(e)}"
-        )
+        raise InternalServerError(detail=f"Failed to get status: {str(e)}")
 
 
 @contextmanager
 def get_db_session():
-    """Context manager for database session."""
+    """Sync context manager for database session (used by non-repo sync functions)."""
     db = SessionLocal()
     try:
         yield db
@@ -354,7 +353,7 @@ def get_db_session():
         db.close()
 
 
-def perform_property_pdf_sync(listing_ids: Optional[List[str]] = None) -> dict:
+async def perform_property_pdf_sync(listing_ids: Optional[List[str]] = None) -> dict:
     """
     Perform property PDF sync operation.
     
@@ -364,21 +363,24 @@ def perform_property_pdf_sync(listing_ids: Optional[List[str]] = None) -> dict:
     Returns:
         Dictionary with sync results
     """
+    from app.db.connection import get_session_maker
+    
     DEFAULT_CHUNK_SIZE = 500
     
-    with get_db_session() as db:
+    session_maker = get_session_maker()
+    async with session_maker() as db:
         listing_repo = ListingRepository(db)
         pdf_processor = PropertyPDFProcessor(chunk_size=DEFAULT_CHUNK_SIZE)
         
         with PgVectorStore() as vector_store:
             # Fetch listings
             if listing_ids:
-                listings = listing_repo.fetch_listings(
+                listings = await listing_repo.fetch_listings(
                     listing_ids=listing_ids,
                     listing_status=None
                 )
             else:
-                listings = listing_repo.fetch_listings(
+                listings = await listing_repo.fetch_listings(
                     listing_ids=None,
                     listing_status="active"
                 )
@@ -398,7 +400,7 @@ def perform_property_pdf_sync(listing_ids: Optional[List[str]] = None) -> dict:
             
             for listing in listings:
                 listing_id = listing.get('id')
-                property_docs = listing_repo.fetch_property_documents(listing_id)
+                property_docs = await listing_repo.fetch_property_documents(listing_id)
                 
                 if not property_docs:
                     continue
@@ -556,7 +558,7 @@ def perform_generic_pdf_sync(re_index: bool = False) -> dict:
         }
         
     except Exception as e:
-        raise Exception(f"Generic PDF sync failed: {str(e)}")
+        raise InternalServerError(detail=f"Generic PDF sync failed: {str(e)}")
     finally:
         knowledge_store.close()
 
@@ -586,7 +588,7 @@ async def sync_generic_pdfs_upload(
     if len(files) > max_files:
         error_msg = f"Too many files. Max allowed: {max_files}, received: {len(files)}"
         print(f"❌ File upload rejected: {error_msg}")
-        raise HTTPException(status_code=400, detail=error_msg)
+        raise BadRequestError(detail=error_msg)
 
     # Check 2: File extension validation - reject if ANY non-PDF is found
     rejected_files = []
@@ -600,10 +602,7 @@ async def sync_generic_pdfs_upload(
     if rejected_files:
         error_msg = f"Only PDF files are allowed. Rejected files: {', '.join(rejected_files)}"
         print(f"❌ File upload rejected: {error_msg}")
-        raise HTTPException(
-            status_code=400,
-            detail=error_msg
-        )
+        raise BadRequestError(detail=error_msg)
 
     # Only proceed if ALL validations pass
     # Stage uploads to a temp directory we can clean up after processing
@@ -640,7 +639,7 @@ async def sync_generic_pdfs_upload(
                 shutil.rmtree(tmp_dir)
             except Exception:
                 pass
-            raise HTTPException(status_code=400, detail="No valid PDF files received (check file type/size).")
+            raise BadRequestError(detail="No valid PDF files received (check file type/size).")
 
         result = perform_generic_pdf_sync_from_files(
             pdf_paths=accepted_paths,
@@ -665,7 +664,7 @@ async def sync_generic_pdfs_upload(
             shutil.rmtree(tmp_dir)
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail=f"Generic PDF upload sync failed: {str(e)}")
+        raise InternalServerError(detail=f"Generic PDF upload sync failed: {str(e)}")
 
 
 @router.post("/generic-pdfs/upload-async", response_model=dict)
@@ -689,7 +688,7 @@ async def sync_generic_pdfs_upload_async(
     if len(files) > max_files:
         error_msg = f"Too many files. Max allowed: {max_files}, received: {len(files)}"
         print(f"❌ File upload rejected: {error_msg}")
-        raise HTTPException(status_code=400, detail=error_msg)
+        raise BadRequestError(detail=error_msg)
 
     # Check 2: File extension validation - reject if ANY non-PDF is found
     rejected_files = []
@@ -703,10 +702,7 @@ async def sync_generic_pdfs_upload_async(
     if rejected_files:
         error_msg = f"Only PDF files are allowed. Rejected files: {', '.join(rejected_files)}"
         print(f"❌ File upload rejected: {error_msg}")
-        raise HTTPException(
-            status_code=400,
-            detail=error_msg
-        )
+        raise BadRequestError(detail=error_msg)
 
     # Only proceed if ALL validations pass
     tmp_dir = Path(tempfile.mkdtemp(prefix="generic_pdfs_"))
@@ -740,7 +736,7 @@ async def sync_generic_pdfs_upload_async(
             shutil.rmtree(tmp_dir)
         except Exception:
             pass
-        raise HTTPException(status_code=400, detail="No valid PDF files received (check file type/size).")
+        raise BadRequestError(detail="No valid PDF files received (check file type/size).")
 
     # Run in background; cleanup_dir deletes temp files at the end.
     background_tasks.add_task(
@@ -930,13 +926,10 @@ async def sync_property_pdfs(
     verify_webhook_secret(x_webhook_secret)
     
     try:
-        result = perform_property_pdf_sync(listing_ids=request.listing_ids)
+        result = await perform_property_pdf_sync(listing_ids=request.listing_ids)
         return PropertyPDFSyncResponse(**result)
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Property PDF sync failed: {str(e)}"
-        )
+        raise InternalServerError(detail=f"Property PDF sync failed: {str(e)}")
 
 
 @router.post("/property-pdfs-async", response_model=dict)
@@ -991,10 +984,7 @@ async def sync_generic_pdfs(
         result = perform_generic_pdf_sync(re_index=request.re_index)
         return GenericPDFSyncResponse(**result)
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Generic PDF sync failed: {str(e)}"
-        )
+        raise InternalServerError(detail=f"Generic PDF sync failed: {str(e)}")
 
 
 @router.post("/generic-pdfs-async", response_model=dict)

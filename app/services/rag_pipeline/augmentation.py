@@ -74,7 +74,7 @@ class QueryAugmenter:
             self._generic_store = GenericKnowledgeStore()
         return self._generic_store
     
-    def augment_query(
+    async def augment_query(
         self,
         query: str,
         listing_id: Optional[str] = None,
@@ -97,24 +97,24 @@ class QueryAugmenter:
         """
         # Route to generic knowledge if requested
         if query_source == QUERY_SOURCE_GENERIC:
-            return self._augment_generic_query(query, n_results)
+            return await self._augment_generic_query(query, n_results)
         
         # Otherwise, use property-specific retrieval
-        results, location_context = self._retrieve_property_data(
+        results, location_context = await self._retrieve_property_data(
             query=query,
             listing_id=listing_id,
             n_results=n_results
         )
         
         # Format retrieved context in a clear, structured way
-        augmented_context, data_sources = self._format_property_context(
+        augmented_context, data_sources = await self._format_property_context(
             results=results,
             location_context=location_context
         )
         
         return augmented_context, data_sources, location_context
     
-    def augment_query_json_chunks(
+    async def augment_query_json_chunks(
         self,
         query: str,
         listing_id: str,
@@ -135,6 +135,7 @@ class QueryAugmenter:
         # Retrieve property chunks EXCLUDING property_document chunks at retrieval time
         # This ensures property_document chunks don't dominate the results
         location_context = None
+        keep_property_document_chunks = False  # True only for comparable/sold queries
         
         if listing_id:
             from app.services.rag_pipeline.location_utils import detect_location_query, get_location_from_chunk
@@ -145,19 +146,29 @@ class QueryAugmenter:
                 # For other location queries (amenities, transport), use standard retrieve
                 if query_type == 'nearby_properties':
                     # Nearby-properties queries: reuse central defaults from the retriever
-                    standard_results, location_context = self.retriever.retrieve_with_location_context(
+                    standard_results, location_context = await self.retriever.retrieve_with_location_context(
                         query=query,
                         listing_id=listing_id,
                         n_results=n_results,
                     )
-                    # Filter out property_document chunks from results
-                    results = [
-                        r for r in standard_results
-                        if r.get('chunk_type') != 'property_document' and r.get('metadata', {}).get('chunk_type') != 'property_document'
-                    ][:n_results]
+                    # For "nearby SOLD" / comparable sales, keep property_document chunks (PDF has comparables).
+                    # For plain "nearby properties" (active listings), exclude PDF so answer uses location_context.
+                    query_lower = query.lower()
+                    is_comparable_sold = any(
+                        term in query_lower for term in
+                        ('sold', 'comparable', 'recent sale', 'recent sales', 'properties sold')
+                    )
+                    if is_comparable_sold:
+                        keep_property_document_chunks = True
+                        results = standard_results[:n_results]
+                    else:
+                        results = [
+                            r for r in standard_results
+                            if r.get('chunk_type') != 'property_document' and r.get('metadata', {}).get('chunk_type') != 'property_document'
+                        ][:n_results]
                 else:
                     # For other location queries (amenities, transport), keep existing behavior
-                    standard_results = self.retriever.retrieve(
+                    standard_results = await self.retriever.retrieve(
                         query=query,
                         n_results=n_results,
                         listing_id=listing_id,
@@ -171,37 +182,40 @@ class QueryAugmenter:
                             break
                     results = standard_results
             else:
-                # Standard retrieval - EXCLUDE property_document chunks
-                results = self.retriever.retrieve(
+                # Standard retrieval (property_document excluded). Generation will try PDF as last resort if no context.
+                results = await self.retriever.retrieve(
                     query=query,
                     n_results=n_results,
                     listing_id=listing_id,
-                    chunk_types=['overview', 'pricing', 'specifications', 'location', 'attributes', 'amenities']  # Explicitly exclude property_document
+                    chunk_types=['overview', 'pricing', 'specifications', 'location', 'attributes', 'amenities']
                 )
         else:
-            results = self.retriever.retrieve(
+            results = await self.retriever.retrieve(
                 query=query,
                 n_results=n_results,
                 listing_id=listing_id,
                 chunk_types=['overview', 'pricing', 'specifications', 'location', 'attributes', 'amenities']  # Explicitly exclude property_document
             )
         
-        # Additional filter as safety net (shouldn't be needed now, but keep for safety)
+        # Additional filter as safety net (skip when we intentionally kept property_document for comparable/sold)
         # chunk_type is a top-level field, not in metadata
-        json_results = [
-            r for r in results
-            if r.get('chunk_type') != 'property_document' and r.get('metadata', {}).get('chunk_type') != 'property_document'
-        ][:n_results]  # Limit to n_results
+        if keep_property_document_chunks:
+            json_results = results[:n_results]
+        else:
+            json_results = [
+                r for r in results
+                if r.get('chunk_type') != 'property_document' and r.get('metadata', {}).get('chunk_type') != 'property_document'
+            ][:n_results]  # Limit to n_results
         
         # Format retrieved context
-        augmented_context, data_sources = self._format_property_context(
+        augmented_context, data_sources = await self._format_property_context(
             results=json_results,
             location_context=location_context
         )
         
         return augmented_context, data_sources, location_context
     
-    def augment_query_pdf_chunks(
+    async def augment_query_pdf_chunks(
         self,
         query: str,
         listing_id: str,
@@ -234,7 +248,7 @@ class QueryAugmenter:
         )
         
         # Retrieve property_document chunks using the retriever (includes reranking)
-        pdf_results = self.retriever.retrieve(
+        pdf_results = await self.retriever.retrieve(
             query=query,
             n_results=n_results,
             listing_id=listing_id,
@@ -258,21 +272,21 @@ class QueryAugmenter:
         location_context = None
         if is_location_query:
             # Get location context separately (from JSON chunks, not PDFs)
-            _, location_context = self.retriever.retrieve_with_location_context(
+            _, location_context = await self.retriever.retrieve_with_location_context(
                 query=query,
                 listing_id=listing_id,
                 n_results=1  # Just need location, not content
             )
         
         # Format retrieved context
-        augmented_context, data_sources = self._format_property_context(
+        augmented_context, data_sources = await self._format_property_context(
             results=pdf_results,
             location_context=location_context
         )
         
         return augmented_context, data_sources, location_context
     
-    def check_data_sufficiency(
+    async def check_data_sufficiency(
         self,
         query: str,
         retrieved_context: str,
@@ -535,7 +549,7 @@ class QueryAugmenter:
         logger.info("Data sufficient: data sources present")
         return True, None
     
-    def _augment_generic_query(
+    async def _augment_generic_query(
         self,
         query: str,
         n_results: int = 5
@@ -1494,7 +1508,7 @@ class QueryAugmenter:
         return context, data_sources, None
     
    
-    def _retrieve_property_data(
+    async def _retrieve_property_data(
         self,
         query: str,
         listing_id: Optional[str],
@@ -1540,7 +1554,7 @@ class QueryAugmenter:
         
         return results, location_context
     
-    def _calculate_similarity(self, distance: Optional[float]) -> Optional[float]:
+    async def _calculate_similarity(self, distance: Optional[float]) -> Optional[float]:
         """
         Calculate similarity score from distance.
         
@@ -1554,7 +1568,7 @@ class QueryAugmenter:
             return 1.0 - distance
         return None
     
-    def _create_property_data_source(
+    async def _create_property_data_source(
         self,
         content: str,
         chunk_type: str,
@@ -1584,7 +1598,7 @@ class QueryAugmenter:
             similarity_score=similarity
         )
     
-    def _format_property_context(
+    async def _format_property_context(
         self,
         results: List[Dict[str, Any]],
         location_context: Optional[Dict[str, Any]]
@@ -1611,7 +1625,7 @@ class QueryAugmenter:
             chunk_type = result.get('chunk_type') or metadata.get('chunk_type') or DEFAULT_CHUNK_TYPE
             listing_id_from_chunk = result.get('listing_id') or metadata.get('listing_id') or DEFAULT_LISTING_ID
             distance = result.get('distance')
-            similarity = self._calculate_similarity(distance)
+            similarity = await self._calculate_similarity(distance)
             
             # Group by listing
             if listing_id_from_chunk not in listings_data:
@@ -1624,7 +1638,7 @@ class QueryAugmenter:
             
             # Track data source
             data_sources.append(
-                self._create_property_data_source(
+                await self._create_property_data_source(
                     content=content,
                     chunk_type=chunk_type,
                     listing_id=listing_id_from_chunk,
