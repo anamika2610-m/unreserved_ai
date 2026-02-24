@@ -7,10 +7,10 @@ called from regular (non-async) code.
 """
 from typing import List, Dict, Any, Optional
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
+from app.db.postgres.repositories import SyncListingRepository
 
 
 def fetch_listings_from_db(
@@ -38,97 +38,14 @@ def fetch_listings_from_db(
         close_db = True
 
     try:
-        # Base query (mirrors the async ListingRepository, but using sync session)
-        query = """
-        SELECT 
-            -- Listing fields
-            l.id,
-            l.property_id as "propertyId",
-            l.listing_type as "listingType",
-            l.listing_status as "listingStatus",
-            l.auction_status as "auctionStatus",
-            l.display_price as "displayPrice",
-            l.price,
-            l.auction_start_price as "auctionStartPrice",
-            l.auction_start_date as "auctionStartDate",
-            l.reserve_price as "reservePrice",
-            p.slug,
-            p.title,
-            p.description,
-            l.published_at as "publishedAt",
-
-            -- Property fields
-            p.property_category as "propertyCategory",
-
-            -- Property attributes
-            pa.bedrooms,
-            pa.bathrooms,
-            pa.land_area as "landArea",
-            pa.floor_area as "floorArea",
-            pa.year_built as "yearBuilt",
-            pa.zoning,
-            pa.garages,
-            pa.ensuites,
-            pa.car_ports as "carPorts",
-            pa.open_parking_spaces as "openParkingSpace",
-            pa.highlights,
-            pa.energy_rating as "energyRating",
-            pa.frontage,
-
-            -- Property type
-            pt.name as "propertyTypeName",
-
-            -- Location
-            loc.id as "locationId",
-            loc.display_address as "displayAddress",
-            loc.street_address as "streetAddress",
-            loc.suburb,
-            loc.city,
-            loc.state,
-            loc.country,
-            loc.postal_code as "postalCode",
-            loc.latitude,
-            loc.longitude
-
-        FROM listings l
-        LEFT JOIN properties p ON l.property_id = p.id
-        LEFT JOIN property_attributes pa ON l.property_attribute_id = pa.id
-        LEFT JOIN property_types pt ON p.property_type_id = pt.id
-        LEFT JOIN locations loc ON p.location_id = loc.id
-
-        WHERE 1=1
-        """
-
-        params: Dict[str, Any] = {}
-
-        if listing_ids:
-            query += " AND l.id = ANY(:listing_ids)"
-            params["listing_ids"] = listing_ids
-
-        if listing_status:
-            query += " AND l.listing_status = :listing_status"
-            params["listing_status"] = listing_status
-
-        query += " ORDER BY l.published_at DESC"
-
-        if limit:
-            query += " LIMIT :limit"
-            params["limit"] = limit
-
-        result = db.execute(text(query), params)
-        rows = result.fetchall()
-
-        from app.helpers.ingestion_pipeline.property.formatters import (
-            format_listing_for_chunking,
+        # Delegate to sync repository layer so ingestion code still goes via a
+        # repository abstraction, not raw SQL in scripts.
+        repo = SyncListingRepository(db)
+        return repo.fetch_listings(
+            listing_ids=listing_ids,
+            listing_status=listing_status,
+            limit=limit,
         )
-
-        listings: List[Dict[str, Any]] = []
-        for row in rows:
-            row_dict = dict(row._mapping)
-            formatted = format_listing_for_chunking(row_dict)
-            listings.append(formatted)
-
-        return listings
     finally:
         if close_db:
             db.close()
