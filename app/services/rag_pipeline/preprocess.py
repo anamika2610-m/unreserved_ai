@@ -349,7 +349,9 @@ def _detect_query_source_with_llm(query: str, conversation_history: Optional[Lis
         if conversation_history:
             recent_messages = conversation_history[-2:]  # Last 2 messages for context
             context = "\n".join([f"{msg['role']}: {msg['content'][:200]}" for msg in recent_messages])
-        
+        recent_context_block = ""
+        if context:
+            recent_context_block = "Recent context:\n" + context
         prompt = f"""Classify this real estate query as either 'generic' or 'property':
 
 - 'generic': Questions about laws, regulations, processes, licensing, general knowledge
@@ -358,8 +360,8 @@ def _detect_query_source_with_llm(query: str, conversation_history: Optional[Lis
 - 'property': Questions about a specific property listing
   Examples: "what is the price", "how many bedrooms", "what are the amenities", "where is it located"
 
-Query: {query}
-{f"Recent context:\n{context}" if context else ""}
+Query: {query}{recent_context_block}
+
 
 Respond with ONLY: 'generic' or 'property'"""
         
