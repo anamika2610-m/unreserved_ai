@@ -722,6 +722,7 @@ class ListingRepository:
             AND pm.category IN ('floor_plan', 'other')
             AND pm.is_public = true
             AND mm.file_type = 'pdf'
+            AND mm.is_private = false
             ORDER BY pm.display_order
         """
         
