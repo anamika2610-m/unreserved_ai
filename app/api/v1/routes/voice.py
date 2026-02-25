@@ -296,14 +296,12 @@ async def text_to_speech(
     """
     api_key = (
         os.getenv("ELEVENLABS_API_KEY")
-        or os.getenv("XI_API_KEY")
-        or os.getenv("ELEVEN_LABS_API_KEY")
     )
     if api_key:
         api_key = api_key.strip()
     if not api_key:
         raise InternalServerError(
-            detail="ElevenLabs API key not configured. Set ELEVENLABS_API_KEY or XI_API_KEY in .env (in project root).",
+            detail="ElevenLabs API key not configured. Set ELEVENLABS_API_KEY in .env (in project root).",
         )
 
     if format not in ELEVENLABS_OUTPUT_FORMATS:
