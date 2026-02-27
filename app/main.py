@@ -38,7 +38,9 @@ API_DESCRIPTION = "RESTful API for conversational property listing queries"
 # Note: allow_origins=["*"] is permissive - restrict in production
 CORS_ORIGINS = [
     # "*",
-    "https://staging.unreservedrealestate.com.au/"
+    "https://staging.unreservedrealestate.com.au/",
+    "https://staging.unreservedrealestate.com.au"
+    
 ]
 
 
@@ -70,6 +72,7 @@ app = FastAPI(
 # Rate limiting (SlowAPI)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
 
 # Centralized app exceptions (ValidationError, DatabaseError, ExternalServiceError, etc.)
 app.add_exception_handler(AppException, app_exception_handler)
