@@ -37,5 +37,4 @@ requests==2.31.0           # HTTP requests for URL downloads
 # Evaluation & metrics
 mlflow>=2.14.0
 scikit-learn>=1.5.0
-jsonschema>=4.22.0
 
