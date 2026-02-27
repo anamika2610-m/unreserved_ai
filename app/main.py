@@ -10,6 +10,8 @@ Or:
 # Import config first to set up environment variables before other imports
 import app.config  # noqa: F401
 
+import json
+import time
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -38,7 +40,9 @@ API_DESCRIPTION = "RESTful API for conversational property listing queries"
 # Note: allow_origins=["*"] is permissive - restrict in production
 CORS_ORIGINS = [
     # "*",
-    "https://staging.unreservedrealestate.com.au/"
+    "https://staging.unreservedrealestate.com.au/",
+    "https://staging.unreservedrealestate.com.au"
+    
 ]
 
 
@@ -71,6 +75,8 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
+# Setup Observability (Prometheus + OpenTelemetry)
+
 # Centralized app exceptions (ValidationError, DatabaseError, ExternalServiceError, etc.)
 app.add_exception_handler(AppException, app_exception_handler)
 
@@ -82,6 +88,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# #region agent log
+@app.middleware("http")
+async def debug_cors_middleware(request: Request, call_next):
+    # Log request details for CORS debugging
+    try:
+        log_entry = {
+            "sessionId": "eb8b12",
+            "runId": "cors_debug_1",
+            "hypothesisId": "check_origin",
+            "location": "main.py:middleware",
+            "message": "CORS Debug Check",
+            "data": {
+                "origin": request.headers.get("origin"),
+                "configured_origins": CORS_ORIGINS,
+                "path": request.url.path,
+                "method": request.method
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+        with open("/Users/nagarjunach/Documents/Unreserved_chatbot/.cursor/debug-eb8b12.log", "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+    except Exception:
+        pass
+    
+    response = await call_next(request)
+    return response
+# #endregion
 
 # Register routers
 app.include_router(chat_router)

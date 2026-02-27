@@ -32,6 +32,11 @@ class AppSettings(BaseSettings):
     rate_limit_per_minute: int = 60
     redis_url: str = ""  # e.g. redis://localhost:6379/0; leave empty for in-memory storage
 
+    # Observability
+    otel_service_name: str = "unreserved-ai"
+    otel_exporter_otlp_endpoint: str = ""  # e.g. http://localhost:4317
+    app_version: str = "1.0.0"
+
     class Config:
         env_file = ".env"
         case_sensitive = False
