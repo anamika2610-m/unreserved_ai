@@ -29,6 +29,8 @@ openai>=2.15.0  # Upgraded to fix httpx compatibility issue
 # Utilities
 watchdog==6.0.0
 psutil==6.1.1
+sentry-sdk[fastapi]==2.21.0
+
 
 
 PyPDF2==3.0.1              # PDF text extraction
