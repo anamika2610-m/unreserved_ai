@@ -7,8 +7,14 @@ Run with:
 Or:
     python -m uvicorn app.main:app --reload
 """
-# Import config first to set up environment variables before other imports
+import os
 import app.config  # noqa: F401
+
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+
+from app.core.settings import settings
+
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -19,7 +25,8 @@ from slowapi.errors import RateLimitExceeded
 
 from app.api.v1.routes.chat import router as chat_router
 from app.core.exceptions import AppException, app_exception_handler
-from app.core.rate_limiter import limiter, rate_limit_exceeded_handler, rate_limit
+from app.core.rate_limiter import limiter, rate_limit_exceeded_handler,rate_limit
+
 from app.db.connection import close_db
 from app.api.v1.routes.sync import router as sync_router
 from app.api.v1.routes.voice import router as voice_router
@@ -29,6 +36,18 @@ from app.api.v1.routes.admin import router as admin_router
 from app.api.v1.routes.activity import router as activity_router
 from app.scheduler import start_summary_scheduler
 
+
+sentry_sdk.init(
+    dsn=settings.sentry_dsn,
+    send_default_pii=True,
+    
+    integrations=[FastApiIntegration()],
+    environment=settings.sentry_environment,
+    traces_sample_rate=1.0,
+    debug=True
+)
+
+
 # Application metadata
 API_VERSION = "1.0.0"
 API_TITLE = "Unreserved Property Chat API"
@@ -37,8 +56,7 @@ API_DESCRIPTION = "RESTful API for conversational property listing queries"
 # CORS configuration
 # Note: allow_origins=["*"] is permissive - restrict in production
 CORS_ORIGINS = [
-    # "*",
-    "https://staging.unreservedrealestate.com.au/"
+    "*",
 ]
 
 
@@ -70,6 +88,7 @@ app = FastAPI(
 # Rate limiting (SlowAPI)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
 
 # Centralized app exceptions (ValidationError, DatabaseError, ExternalServiceError, etc.)
 app.add_exception_handler(AppException, app_exception_handler)
@@ -103,6 +122,11 @@ app.include_router(health_router)
 async def simple_health():
     """Simple health check endpoint for Docker/Kubernetes healthchecks."""
     return {"status": "healthy"}
+
+
+@app.get("/sentry-debug")
+async def trigger_error():
+    division_by_zero = 1 / 0
 
 
 @app.get("/rate-limit-test")
