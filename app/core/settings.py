@@ -32,6 +32,13 @@ class AppSettings(BaseSettings):
     rate_limit_per_minute: int = 60
     redis_url: str = ""  # e.g. redis://localhost:6379/0; leave empty for in-memory storage
 
+    # Sentry
+    sentry_dsn: str = ""
+    sentry_environment: str = "development"
+
+    # Metrics
+    enable_metrics: bool = True
+
     class Config:
         env_file = ".env"
         case_sensitive = False
