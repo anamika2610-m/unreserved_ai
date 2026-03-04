@@ -56,10 +56,7 @@ API_DESCRIPTION = "RESTful API for conversational property listing queries"
 # CORS configuration
 # Note: allow_origins=["*"] is permissive - restrict in production
 CORS_ORIGINS = [
-    # "*",
-    "https://staging.unreservedrealestate.com.au/",
-    "https://staging.unreservedrealestate.com.au"
-    
+    "*",
 ]
 
 
