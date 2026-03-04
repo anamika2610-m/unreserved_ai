@@ -27,7 +27,8 @@ from app.api.v1.routes.chat import router as chat_router
 from app.core.exceptions import AppException, app_exception_handler
 from app.core.rate_limiter import limiter, rate_limit_exceeded_handler,rate_limit
 
-from app.db.connection import close_db
+from app.db.connection import shutdown_all_databases
+from app.api.v1.routes.chat import close_generator as close_chat_generator
 from app.api.v1.routes.sync import router as sync_router
 from app.api.v1.routes.voice import router as voice_router
 # from app.api.v1.routes.voice_realtime import router as voice_realtime_router
@@ -72,7 +73,18 @@ async def lifespan(app: FastAPI):
                 await summary_task
             except asyncio.CancelledError:
                 pass
-        await close_db()
+        
+        # CRITICAL: Close all database connections and resources
+        # Order matters: close generator first (it uses sync db), then close engines
+        print("🧹 Shutting down: closing database connections...")
+        
+        # 1. Close the singleton ResponseGenerator (releases PgVectorStore sessions)
+        close_chat_generator()
+        
+        # 2. Close all database engines (sync and async)
+        await shutdown_all_databases()
+        
+        print("✓ All database connections closed")
 
 
 # Create FastAPI app

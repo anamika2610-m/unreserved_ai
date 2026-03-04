@@ -185,34 +185,32 @@ def perform_sync(
     chunker = PropertyListingChunker()
     all_chunks = chunker.chunk_all_listings(listings)
     
-    # Initialize pgvector store
-    vector_store = PgVectorStore(
-        embedding_model="text-embedding-3-small"
-    )
-    
-    # IMPORTANT: We no longer clear all embeddings from this endpoint.
-    # `clear_existing` is accepted for backwards compatibility, but ignored
-    # to ensure vector embeddings persist across syncs.
-    if clear_existing:
-        print(
-            "ℹ️  clear_existing was requested, but full reset of embeddings is "
-            "disabled to preserve existing vectors. Run a manual maintenance "
-            "job if you truly need to wipe the vector store."
-        )
-    
-    # Add chunks
-    vector_store.add_chunks(all_chunks)
-    
-    # Get final stats
-    stats = vector_store.get_stats()
-    
-    return {
-        "status": "success",
-        "message": f"Successfully synced {len(listings)} listings",
-        "listings_synced": len(listings),
-        "chunks_created": len(all_chunks),
-        "total_embeddings": stats["total_chunks"]
-    }
+    # Initialize pgvector store with context manager for proper cleanup
+    # CRITICAL: This ensures the database session is always closed
+    with PgVectorStore(embedding_model="text-embedding-3-small") as vector_store:
+        # IMPORTANT: We no longer clear all embeddings from this endpoint.
+        # `clear_existing` is accepted for backwards compatibility, but ignored
+        # to ensure vector embeddings persist across syncs.
+        if clear_existing:
+            print(
+                "ℹ️  clear_existing was requested, but full reset of embeddings is "
+                "disabled to preserve existing vectors. Run a manual maintenance "
+                "job if you truly need to wipe the vector store."
+            )
+        
+        # Add chunks
+        vector_store.add_chunks(all_chunks)
+        
+        # Get final stats
+        stats = vector_store.get_stats()
+        
+        return {
+            "status": "success",
+            "message": f"Successfully synced {len(listings)} listings",
+            "listings_synced": len(listings),
+            "chunks_created": len(all_chunks),
+            "total_embeddings": stats["total_chunks"]
+        }
 
 
 async def _sync_listings_handler(
@@ -322,22 +320,20 @@ async def get_sync_status():
     Returns information about the collection including total embeddings count.
     """
     try:
-        vector_store = PgVectorStore(
-            embedding_model="all-MiniLM-L6-v2"
-        )
-        
-        stats = vector_store.get_stats()
-        
-        return SyncStatusResponse(
-            collection_name="property_embeddings",  # pgvector table name
-            total_embeddings=stats["total_chunks"],
-            embedding_model=stats["embedding_model"],
-            metadata={
-                "unique_listings": stats["unique_listings"],
-                "chunk_types": stats["chunk_types"],
-                "vector_dimension": stats["vector_dimension"]
-            }
-        )
+        # Use context manager to ensure PgVectorStore session is properly closed
+        with PgVectorStore(embedding_model="all-MiniLM-L6-v2") as vector_store:
+            stats = vector_store.get_stats()
+            
+            return SyncStatusResponse(
+                collection_name="property_embeddings",  # pgvector table name
+                total_embeddings=stats["total_chunks"],
+                embedding_model=stats["embedding_model"],
+                metadata={
+                    "unique_listings": stats["unique_listings"],
+                    "chunk_types": stats["chunk_types"],
+                    "vector_dimension": stats["vector_dimension"]
+                }
+            )
         
     except Exception as e:
         raise InternalServerError(detail=f"Failed to get status: {str(e)}")

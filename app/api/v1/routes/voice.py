@@ -201,8 +201,8 @@ async def transcribe_and_chat(
     from app.db.connection import get_session_maker
     session_maker = get_session_maker()
     
-    async with session_maker() as db:
-        try:
+    try:
+        async with session_maker() as db:
             # First, transcribe the audio
             transcription_result = await transcribe_voice(request, file)
             transcribed_text = transcription_result.text
@@ -232,14 +232,21 @@ async def transcribe_and_chat(
                 },
                 "chat_response": chat_response.dict(),
             }
-        
-        except Exception as e:
-            print(f"❌ Chat processing failed: {e}")
-            print(traceback.format_exc())
-            raise HTTPException(
-                status_code=500,
-                detail=f"Chat processing failed: {str(e)}"
-            )
+    
+    except Exception as e:
+        print(f"❌ Chat processing failed: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Chat processing failed: {str(e)}"
+        )
+    finally:
+        # CRITICAL: Always close the generator to release database connections
+        if generator:
+            try:
+                generator.close()
+            except Exception:
+                pass
 
 
 class TextToSpeechRequest(BaseModel):

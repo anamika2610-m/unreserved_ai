@@ -513,7 +513,6 @@ class PgVectorStore:
         Returns:
             List of all chunks for the listing
         """
-        embeddings = []
         try:
             embeddings = (
                 self.db_session.query(PropertyEmbedding)
@@ -521,36 +520,27 @@ class PgVectorStore:
                 .order_by(PropertyEmbedding.chunk_index)
                 .all()
             )
-            # Explicitly end the read-only transaction
+            
+            # Extract data BEFORE commit to prevent lazy-loading expired objects
+            results = [
+                {
+                    'id': emb.id,
+                    'listing_id': emb.listing_id,
+                    'chunk_type': emb.chunk_type,
+                    'chunk_index': emb.chunk_index,
+                    'content': emb.content,
+                    'metadata': emb.chunk_metadata
+                }
+                for emb in embeddings
+            ]
+            
+            # Commit to close the read transaction and prevent "idle in transaction"
             self.db_session.commit()
+            
+            return results
         except Exception:
-            try:
-                self.db_session.rollback()
-            except Exception:
-                pass
+            self.db_session.rollback()
             raise
-        finally:
-            # Safety net: ensure no transaction is left open (prevents idle in transaction)
-            try:
-                if hasattr(self.db_session, "in_transaction"):
-                    if self.db_session.in_transaction():
-                        self.db_session.rollback()
-                elif hasattr(self.db_session, "is_active") and self.db_session.is_active:
-                    self.db_session.rollback()
-            except Exception:
-                pass
-        
-        return [
-            {
-                'id': emb.id,
-                'listing_id': emb.listing_id,
-                'chunk_type': emb.chunk_type,
-                'chunk_index': emb.chunk_index,
-                'content': emb.content,
-                'metadata': emb.chunk_metadata
-            }
-            for emb in embeddings
-        ]
     
     def get_property_location(self, listing_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -562,47 +552,37 @@ class PgVectorStore:
         Returns:
             Dictionary with latitude, longitude, and address, or None if not found
         """
-        embedding = None
         try:
             embedding = (
                 self.db_session.query(PropertyEmbedding)
                 .filter(PropertyEmbedding.listing_id == str(listing_id))
                 .first()
             )
+            
+            if not embedding or not embedding.chunk_metadata:
+                self.db_session.commit()
+                return None
+            
+            # Extract data BEFORE commit
+            metadata = embedding.chunk_metadata
+            latitude = metadata.get('latitude')
+            longitude = metadata.get('longitude')
+            address = metadata.get('location') or metadata.get('address', '')
+            
+            # Commit to close the read transaction and prevent "idle in transaction"
             self.db_session.commit()
-        except Exception:
-            try:
-                self.db_session.rollback()
-            except Exception:
-                pass
-            raise
-        finally:
-            try:
-                if hasattr(self.db_session, "in_transaction"):
-                    if self.db_session.in_transaction():
-                        self.db_session.rollback()
-                elif hasattr(self.db_session, "is_active") and self.db_session.is_active:
-                    self.db_session.rollback()
-            except Exception:
-                pass
-        
-        if not embedding or not embedding.chunk_metadata:
+            
+            if latitude is not None and longitude is not None:
+                return {
+                    'latitude': float(latitude),
+                    'longitude': float(longitude),
+                    'address': address
+                }
+            
             return None
-        
-        metadata = embedding.chunk_metadata
-        
-        latitude = metadata.get('latitude')
-        longitude = metadata.get('longitude')
-        address = metadata.get('location') or metadata.get('address', '')
-        
-        if latitude is not None and longitude is not None:
-            return {
-                'latitude': float(latitude),
-                'longitude': float(longitude),
-                'address': address
-            }
-        
-        return None
+        except Exception:
+            self.db_session.rollback()
+            raise
     
     def get_all_chunks(self) -> Dict[str, Any]:
         """
@@ -612,31 +592,23 @@ class PgVectorStore:
         Returns:
             Dictionary with 'ids', 'documents', and 'metadatas' keys
         """
-        embeddings = []
         try:
             embeddings = self.db_session.query(PropertyEmbedding).all()
+            
+            # Extract data BEFORE commit
+            results = {
+                'ids': [emb.id for emb in embeddings],
+                'documents': [emb.content for emb in embeddings],
+                'metadatas': [emb.chunk_metadata for emb in embeddings]
+            }
+            
+            # Commit to close the read transaction and prevent "idle in transaction"
             self.db_session.commit()
+            
+            return results
         except Exception:
-            try:
-                self.db_session.rollback()
-            except Exception:
-                pass
+            self.db_session.rollback()
             raise
-        finally:
-            try:
-                if hasattr(self.db_session, "in_transaction"):
-                    if self.db_session.in_transaction():
-                        self.db_session.rollback()
-                elif hasattr(self.db_session, "is_active") and self.db_session.is_active:
-                    self.db_session.rollback()
-            except Exception:
-                pass
-        
-        return {
-            'ids': [emb.id for emb in embeddings],
-            'documents': [emb.content for emb in embeddings],
-            'metadatas': [emb.chunk_metadata for emb in embeddings]
-        }
     
     def delete_by_listing_id(self, listing_id: str) -> int:
         """
@@ -648,11 +620,15 @@ class PgVectorStore:
         Returns:
             Number of chunks deleted
         """
-        count = self.db_session.query(PropertyEmbedding).filter(
-            PropertyEmbedding.listing_id == str(listing_id)
-        ).delete()
-        self.db_session.commit()
-        return count
+        try:
+            count = self.db_session.query(PropertyEmbedding).filter(
+                PropertyEmbedding.listing_id == str(listing_id)
+            ).delete()
+            self.db_session.commit()
+            return count
+        except Exception:
+            self.db_session.rollback()
+            raise
     
     def clear_all(self) -> None:
         """
@@ -662,9 +638,13 @@ class PgVectorStore:
         Only use this if you want to completely reset the vector store.
         For normal syncing, use add_chunks() which handles incremental updates automatically.
         """
-        self.db_session.query(PropertyEmbedding).delete()
-        self.db_session.commit()
-        logger.warning("⚠️  All embeddings cleared (including property_document chunks)")
+        try:
+            self.db_session.query(PropertyEmbedding).delete()
+            self.db_session.commit()
+            logger.warning("⚠️  All embeddings cleared (including property_document chunks)")
+        except Exception:
+            self.db_session.rollback()
+            raise
     
     def get_stats(self) -> Dict[str, Any]:
         """
@@ -673,9 +653,6 @@ class PgVectorStore:
         Returns:
             Dictionary with stats
         """
-        total_chunks = 0
-        unique_listings = 0
-        chunk_type_counts = []
         try:
             total_chunks = self.db_session.query(PropertyEmbedding).count()
             
@@ -692,30 +669,19 @@ class PgVectorStore:
                 """)
             ).fetchall()
             
+            # Commit to close the read transaction and prevent "idle in transaction"
             self.db_session.commit()
+            
+            return {
+                'total_chunks': total_chunks,
+                'unique_listings': unique_listings or 0,
+                'chunk_types': {row[0]: row[1] for row in chunk_type_counts},
+                'embedding_model': self.embedding_model_name,
+                'vector_dimension': VECTOR_DIMENSION
+            }
         except Exception:
-            try:
-                self.db_session.rollback()
-            except Exception:
-                pass
+            self.db_session.rollback()
             raise
-        finally:
-            try:
-                if hasattr(self.db_session, "in_transaction"):
-                    if self.db_session.in_transaction():
-                        self.db_session.rollback()
-                elif hasattr(self.db_session, "is_active") and self.db_session.is_active:
-                    self.db_session.rollback()
-            except Exception:
-                pass
-        
-        return {
-            'total_chunks': total_chunks,
-            'unique_listings': unique_listings or 0,
-            'chunk_types': {row[0]: row[1] for row in chunk_type_counts},
-            'embedding_model': self.embedding_model_name,
-            'vector_dimension': VECTOR_DIMENSION
-        }
     
     def _refresh_session(self):
         """Refresh the database session if it's stale."""
