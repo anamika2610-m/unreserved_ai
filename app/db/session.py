@@ -176,7 +176,7 @@ def set_postgresql_timeout(dbapi_conn, connection_record):
         cursor.close()
         dbapi_conn.commit()
     except Exception as e:
-        print(f"⚠️  Failed to set PostgreSQL timeouts: {e}")
+        logger.warning("Failed to set PostgreSQL timeouts: %s", e)
         try:
             cursor.close()
         except:
@@ -246,12 +246,12 @@ def get_db() -> Generator[Session, None, None]:
             break
         except (OperationalError, DisconnectionError) as e:
             if attempt < MAX_RETRIES - 1:
-                print(f"⚠️  Database connection attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
-                print(f"   Retrying in {retry_delay}s...")
+                logger.warning("Database connection attempt %d/%d failed: %s", attempt + 1, MAX_RETRIES, e)
+                logger.info("Retrying in %ds...", retry_delay)
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
             else:
-                print(f"❌ Database connection failed after {MAX_RETRIES} attempts")
+                logger.error("Database connection failed after %d attempts", MAX_RETRIES)
                 raise
     
     if db is None:
@@ -274,7 +274,7 @@ def get_db() -> Generator[Session, None, None]:
             # Invalidate the connection pool to force new connections
             try:
                 engine.pool.invalidate()
-                print("⚠️  Connection pool invalidated due to closed connection")
+                logger.warning("Connection pool invalidated due to closed connection")
             except:
                 pass
         try:
@@ -329,7 +329,7 @@ def check_db_connection() -> bool:
             conn.execute(text("SELECT 1"))
         return True
     except Exception as e:
-        print(f"Database health check failed: {e}")
+        logger.warning("Database health check failed: %s", e)
         return False
 
 

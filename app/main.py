@@ -8,6 +8,8 @@ Or:
     python -m uvicorn app.main:app --reload
 """
 import os
+import logging
+
 import app.config  # noqa: F401
 
 import sentry_sdk
@@ -37,6 +39,8 @@ from app.api.v1.routes.admin import router as admin_router
 from app.api.v1.routes.activity import router as activity_router
 from app.scheduler import start_summary_scheduler
 
+
+logger = logging.getLogger(__name__)
 
 sentry_sdk.init(
     dsn=settings.sentry_dsn,
@@ -76,7 +80,7 @@ async def lifespan(app: FastAPI):
         
         # CRITICAL: Close all database connections and resources
         # Order matters: close generator first (it uses sync db), then close engines
-        print("🧹 Shutting down: closing database connections...")
+        logger.info("Shutting down: closing database connections...")
         
         # 1. Close the singleton ResponseGenerator (releases PgVectorStore sessions)
         close_chat_generator()
@@ -84,7 +88,7 @@ async def lifespan(app: FastAPI):
         # 2. Close all database engines (sync and async)
         await shutdown_all_databases()
         
-        print("✓ All database connections closed")
+        logger.info("All database connections closed")
 
 
 # Create FastAPI app
