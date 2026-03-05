@@ -217,6 +217,10 @@ class PgVectorStore:
         logger.info("Adding %d chunks to vector store...", len(chunks))
 
         logger.info("Generating embeddings using OpenAI...")
+        # Strip NUL bytes from chunk content – PostgreSQL TEXT fields reject \x00
+        for chunk in chunks:
+            if chunk.content:
+                chunk.content = chunk.content.replace('\x00', '')
         texts = [chunk.content for chunk in chunks]
         embeddings = self.embedding_model.encode(
             texts,

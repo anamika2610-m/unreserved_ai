@@ -13,7 +13,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, and_, delete, func
-from sqlalchemy.exc import OperationalError, DisconnectionError
+from sqlalchemy.exc import OperationalError, DisconnectionError, IntegrityError
 
 from app.db.models.conversation import (
     Conversation,
@@ -44,70 +44,69 @@ class ConversationRepository(BaseRepository[Conversation]):
     ) -> Conversation:
         """
         Get an existing conversation or create a new one.
-        
+
+        The unique constraint on (user_id, listing_id) means there is at most
+        ONE conversation row per pair. If that row exists but is inactive (e.g.
+        expired), we reactivate it rather than attempting a new INSERT (which
+        would violate the constraint).
+
         Args:
             user_id: User ID (required)
             listing_id: Listing ID (required)
             conversation_id: Optional conversation ID to continue existing conversation
-            
+
         Returns:
             Conversation instance
         """
         async with self._handle_errors():
-            # Continue explicit conversation
+            # Continue an explicitly referenced conversation
             if conversation_id:
                 conversation = await self.get_by_id(conversation_id)
                 if conversation:
                     return conversation
 
-            # Reuse existing conversation for user + listing
-            query = select(Conversation).where(
+            # Look up ANY existing conversation for this user+listing pair,
+            # regardless of is_active status.  The unique constraint means
+            # there is at most one such row.
+            existing_query = select(Conversation).where(
                 and_(
                     Conversation.user_id == user_id,
                     Conversation.listing_id == listing_id,
-                    Conversation.is_active.is_(True),
                 )
             )
-            
+
             try:
-                result = await self.session.execute(query)
+                result = await self.session.execute(existing_query)
                 conversation = result.scalar_one_or_none()
             except (OperationalError, DisconnectionError) as e:
-                # Check if it's a connection closed error
                 error_str = str(e).lower()
                 if any(phrase in error_str for phrase in [
                     'connection has been closed',
                     'terminating connection',
                     'ssl connection has been closed',
-                    'connection closed unexpectedly'
+                    'connection closed unexpectedly',
                 ]):
-                    # Rollback and retry once with a fresh connection
                     try:
                         await self.session.rollback()
-                    except:
+                    except Exception:
                         pass
-                    # Retry the query once
-                    result = await self.session.execute(query)
+                    result = await self.session.execute(existing_query)
                     conversation = result.scalar_one_or_none()
                 else:
                     raise
-            
-            if conversation:
-                # Keep conversation active only for CONVERSATION_ACTIVE_DAYS from last message
-                cutoff = datetime.now(timezone.utc) - timedelta(days=CONVERSATION_ACTIVE_DAYS)
-                last_activity = conversation.last_message_at or conversation.created_at
-                if last_activity and getattr(last_activity, "tzinfo", None) is None:
-                    from datetime import timezone as tz
-                    last_activity = last_activity.replace(tzinfo=tz.utc)
-                if last_activity and last_activity < cutoff:
-                    conversation.is_active = False
-                    await self.session.commit()
-                    # Fall through to create a new conversation
-                else:
-                    return conversation
 
-            # Create new conversation
-            conversation = Conversation(
+            if conversation:
+                # Reactivate the row (whether it was inactive/expired or just
+                # active – ensure it is marked active and return it).
+                if not conversation.is_active:
+                    conversation.is_active = True
+                    await self.session.commit()
+                    await self.session.refresh(conversation)
+                return conversation
+
+            # No row exists yet – create one.  Guard against a concurrent
+            # INSERT winning the race (optimistic insert pattern).
+            new_conversation = Conversation(
                 id=uuid.uuid4(),
                 listing_id=listing_id,
                 user_id=user_id,
@@ -116,11 +115,22 @@ class ConversationRepository(BaseRepository[Conversation]):
                 meta_data={},
             )
 
-            self.session.add(conversation)
-            await self.session.commit()
-            await self.session.refresh(conversation)
-
-            return conversation
+            self.session.add(new_conversation)
+            try:
+                await self.session.commit()
+                await self.session.refresh(new_conversation)
+                return new_conversation
+            except IntegrityError:
+                # A concurrent request inserted first; rollback and fetch it.
+                await self.session.rollback()
+                result = await self.session.execute(existing_query)
+                conversation = result.scalar_one_or_none()
+                if conversation is None:
+                    raise RuntimeError(
+                        f"Conversation for user={user_id} listing={listing_id} "
+                        "could not be created or fetched after IntegrityError."
+                    )
+                return conversation
 
     # ------------------------------------------------------------------
     # Add message + increment message_count (ATOMIC)
