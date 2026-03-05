@@ -40,5 +40,3 @@ requests==2.31.0           # HTTP requests for URL downloads
 mlflow>=2.14.0
 scikit-learn>=1.5.0
 
-sentry-sdk[fastapi]==2.21.0
-
