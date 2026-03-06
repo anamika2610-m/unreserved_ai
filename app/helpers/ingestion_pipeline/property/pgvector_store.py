@@ -203,12 +203,18 @@ class PgVectorStore:
             return [self._sanitize_metadata(v) for v in value]
         return value
     
-    def add_chunks(self, chunks: List[Chunk]) -> None:
+    def add_chunks(
+        self,
+        chunks: List[Chunk],
+        db_doc_info: Optional[Dict[str, Dict]] = None
+    ) -> None:
         """
         Add property listing chunks to vector store.
         
         Args:
             chunks: List of Chunk objects to embed and store
+            db_doc_info: Optional dict of doc_id -> {total_chunks}
+                        If provided, will sync with DB state (delete stale chunks).
         """
         if not chunks:
             logger.info("No chunks to add")
@@ -232,6 +238,11 @@ class PgVectorStore:
         embeddings = [emb.tolist() if hasattr(emb, 'tolist') else emb for emb in embeddings]
 
         logger.info("Storing in PostgreSQL...")
+        
+        if db_doc_info is not None and chunks:
+            logger.info("Starting chunk sync for %d listings", len(set(c.listing_id for c in chunks if c.listing_id)))
+            self._sync_chunks_with_db(chunks, db_doc_info)
+        
         added_count = 0
         updated_count = 0
         listings_touched = set()
@@ -294,6 +305,7 @@ class PgVectorStore:
                     added_count,
                     updated_count,
                 )
+                
                 list_preview = sorted(listings_touched)[:20]
                 if len(listings_touched) > 20:
                     list_preview.append("...")
@@ -335,6 +347,249 @@ class PgVectorStore:
                     except:
                         pass
                     raise
+    
+    def _sync_chunks_with_db(
+        self,
+        chunks: List[Chunk],
+        db_doc_info: Dict[str, Dict]
+    ) -> None:
+        """
+        Sync chunks with DB state:
+        - Delete all existing property_document chunks for each listing first
+        - Then add fresh chunks from DB
+        
+        This ensures complete sync: any docs not in DB are removed, any new docs are added.
+        
+        Args:
+            chunks: The chunks being synced
+            db_doc_info: Dict of doc_id -> {total_chunks} from DB
+        """
+        if not chunks:
+            logger.info("_sync_chunks_with_db: chunks is empty, returning")
+            return
+        
+        listing_ids = set()
+        for chunk in chunks:
+            if chunk.listing_id:
+                listing_ids.add(str(chunk.listing_id))
+        
+        if not listing_ids:
+            logger.info("_sync_chunks_with_db: no listing_ids found, returning")
+            return
+        
+        logger.info("_sync_chunks_with_db: processing listings %s", list(listing_ids))
+        
+        for listing_id in listing_ids:
+            try:
+                logger.info("_sync_chunks_with_db: checking listing %s for existing property_document chunks", listing_id)
+                deleted_count = (
+                    self.db_session.query(PropertyEmbedding)
+                    .filter(
+                        PropertyEmbedding.listing_id == listing_id,
+                        PropertyEmbedding.chunk_type == "property_document"
+                    )
+                    .delete(synchronize_session=False)
+                )
+                logger.info("_sync_chunks_with_db: found %d existing chunks for listing %s", deleted_count, listing_id)
+                self.db_session.commit()
+                print(f"DEBUG: _sync_chunks_with_db - COMMIT SUCCESS for listing {listing_id}")
+                if deleted_count > 0:
+                    print(f"DEBUG: Deleted {deleted_count} existing chunks for listing {listing_id} before re-sync")
+                    logger.info(
+                        "Deleted %d existing chunks for listing %s before re-sync",
+                        deleted_count, listing_id
+                    )
+            except Exception as e:
+                logger.warning("Failed to delete existing chunks: %s", e)
+                try:
+                    self.db_session.rollback()
+                except:
+                    pass
+    
+    def _cleanup_orphan_chunks(self, chunks: List[Chunk], valid_doc_ids: List[str]) -> None:
+        """
+        Legacy method - redirects to _sync_chunks_with_db with minimal info.
+        """
+        if not chunks or not valid_doc_ids:
+            return
+        
+        db_doc_info = {str(doc_id): {} for doc_id in valid_doc_ids if doc_id}
+        self._sync_chunks_with_db(chunks, db_doc_info)
+    
+    def get_existing_doc_ids(self, listing_id: str) -> Dict[str, Dict]:
+        """
+        Get all existing doc_ids and their info from vector store for a listing.
+        
+        Returns:
+            Dict of doc_id -> {chunk_indices}
+        """
+        existing_chunks = (
+            self.db_session.query(PropertyEmbedding)
+            .filter(
+                PropertyEmbedding.listing_id == listing_id,
+                PropertyEmbedding.chunk_type == "property_document"
+            )
+            .all()
+        )
+        
+        doc_info = {}
+        for chunk in existing_chunks:
+            doc_id = chunk.chunk_metadata.get("doc_id") if chunk.chunk_metadata else None
+            if doc_id:
+                if doc_id not in doc_info:
+                    doc_info[doc_id] = {
+                        "chunk_indices": []
+                    }
+                doc_info[doc_id]["chunk_indices"].append(chunk.chunk_index)
+        
+        return doc_info
+    
+    def sync_property_documents(
+        self,
+        listing_id: str,
+        chunks: List[Chunk],
+        db_doc_info: Dict[str, Dict]
+    ) -> Dict[str, int]:
+        """
+        Efficient sync using list comparison:
+        1. Get existing doc_ids from vector store
+        2. Compare with DB doc_ids
+        3. Delete orphaned docs (in vector store but not DB)
+        4. Add new docs (not in vector store)
+        
+        Returns:
+            Dict with counts: {added, updated, deleted, skipped}
+        """
+        logger.info(f"🔄 [SYNC] Starting sync for listing {listing_id}")
+        
+        # Step 1: Get existing doc_ids from vector store
+        existing_doc_info = self.get_existing_doc_ids(listing_id)
+        existing_doc_ids = set(existing_doc_info.keys())
+        logger.info(f"📋 [SYNC] Found {len(existing_doc_ids)} existing docs in vector store: {existing_doc_ids}")
+        
+        # Step 2: Get doc_ids from DB (chunks)
+        new_doc_ids = set()
+        chunks_by_doc = {}
+        for chunk in chunks:
+            doc_id = chunk.metadata.get("doc_id") if chunk.metadata else None
+            if doc_id:
+                new_doc_ids.add(str(doc_id))
+                if str(doc_id) not in chunks_by_doc:
+                    chunks_by_doc[str(doc_id)] = []
+                chunks_by_doc[str(doc_id)].append(chunk)
+        
+        logger.info(f"📋 [SYNC] DB has {len(new_doc_ids)} docs: {new_doc_ids}")
+        logger.info(f"📋 [SYNC] Vector store has {len(existing_doc_ids)} docs")
+        
+        # Step 3: Find orphaned docs (in vector store but NOT in DB)
+        orphans = existing_doc_ids - new_doc_ids
+        deleted_count = 0
+        skipped_count = 0
+        
+        if orphans:
+            logger.info(f"🗑️  [SYNC] Found {len(orphans)} orphan docs (deleted from DB): {orphans}")
+            try:
+                deleted_count = (
+                    self.db_session.query(PropertyEmbedding)
+                    .filter(
+                        PropertyEmbedding.listing_id == listing_id,
+                        PropertyEmbedding.chunk_type == "property_document",
+                        PropertyEmbedding.chunk_metadata['doc_id'].astext.in_(list(orphans))
+                    )
+                    .delete(synchronize_session=False)
+                )
+                self.db_session.commit()
+                logger.info(f"✅ [SYNC] Deleted {deleted_count} orphan chunks")
+            except Exception as e:
+                logger.warning("Failed to delete orphan chunks: %s", e)
+                self.db_session.rollback()
+        else:
+            logger.info("✅ [SYNC] No orphans to delete")
+        
+        # Step 4: Add new docs - filter chunks to only add new docs
+        docs_to_add = []
+        new_count = 0
+        unchanged_count = 0
+        
+        for doc_id in new_doc_ids:
+            if doc_id not in existing_doc_ids:
+                # New doc - add all chunks
+                new_count += 1
+                docs_to_add.extend(chunks_by_doc[doc_id])
+            else:
+                # Already exists - skip (smart sync handles doc replacement via orphan detection)
+                unchanged_count += 1
+        
+        logger.info(f"📊 [SYNC] Docs status - New: {new_count}, Unchanged: {unchanged_count}")
+        
+        if docs_to_add:
+            self._add_chunks_to_store(docs_to_add, listing_id)
+        
+        logger.info(f"✅ [SYNC] Sync complete - Added: {len(docs_to_add)}, Deleted: {deleted_count}, Skipped: {unchanged_count}")
+        
+        return {
+            "added": len(docs_to_add),
+            "updated": 0,
+            "deleted": deleted_count,
+            "skipped": unchanged_count
+        }
+    
+    def _add_chunks_to_store(self, chunks: List[Chunk], listing_id: str) -> None:
+        """Helper method to embed and add chunks to the database."""
+        if not chunks:
+            return
+        
+        logger.info("Generating embeddings for %d chunks...", len(chunks))
+        
+        for chunk in chunks:
+            if chunk.content:
+                chunk.content = chunk.content.replace('\x00', '')
+        
+        texts = [chunk.content for chunk in chunks]
+        embeddings = self.embedding_model.encode(
+            texts,
+            show_progress_bar=True,
+            convert_to_numpy=True
+        )
+        embeddings = [emb.tolist() if hasattr(emb, 'tolist') else emb for emb in embeddings]
+        
+        logger.info("Storing embeddings in PostgreSQL...")
+        
+        for chunk, embedding in zip(chunks, embeddings):
+            embedding_list = embedding.tolist() if hasattr(embedding, 'tolist') else embedding
+            chunk_index = chunk.chunk_index
+            
+            existing = (
+                self.db_session.query(PropertyEmbedding)
+                .filter(
+                    PropertyEmbedding.listing_id == listing_id,
+                    PropertyEmbedding.chunk_type == chunk.chunk_type,
+                    PropertyEmbedding.chunk_index == chunk_index,
+                )
+                .first()
+            )
+            
+            sanitized_metadata = self._sanitize_metadata(chunk.metadata) if chunk.metadata is not None else None
+            
+            if existing:
+                existing.content = chunk.content
+                existing.embedding = embedding_list
+                existing.chunk_metadata = sanitized_metadata
+            else:
+                import uuid
+                new_embedding = PropertyEmbedding(
+                    id=str(uuid.uuid4()),
+                    listing_id=listing_id,
+                    chunk_type=chunk.chunk_type,
+                    chunk_index=chunk_index,
+                    content=chunk.content,
+                    embedding=embedding_list,
+                    chunk_metadata=sanitized_metadata,
+                )
+                self.db_session.add(new_embedding)
+        
+        self.db_session.commit()
+        logger.info("Successfully added %d chunks to property_embeddings", len(chunks))
     
     def search(
         self,

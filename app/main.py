@@ -7,6 +7,7 @@ Run with:
 Or:
     python -m uvicorn app.main:app --reload
 """
+import logging
 import os
 import app.config  # noqa: F401
 
@@ -14,6 +15,15 @@ import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 
 from app.core.settings import settings
+
+# Configure logging - must be done early before other imports
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+# Ensure app loggers are set to INFO level
+logging.getLogger('app').setLevel(logging.INFO)
 
 
 import asyncio
