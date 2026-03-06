@@ -5,6 +5,7 @@ These endpoints can be called via webhook when listings are added/updated.
 import os
 import shutil
 import tempfile
+import logging
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Header, UploadFile, File, Form
 
@@ -27,6 +28,7 @@ from app.helpers.ingestion_pipeline.generic.generic_knowledge_store import Gener
 from pathlib import Path
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/sync", tags=["sync"])
 
 
@@ -402,20 +404,37 @@ async def perform_property_pdf_sync(listing_ids: Optional[List[str]] = None) -> 
                 listing_id = listing.get('id')
                 property_docs = await listing_repo.fetch_property_documents(listing_id)
                 
-                if not property_docs:
-                    continue
+                if property_docs:
+                    listings_with_docs_count += 1
+                    chunks = pdf_processor.process_property_documents(
+                        listing_id=listing_id,
+                        property_documents=property_docs
+                    )
+                else:
+                    logger.info(f"⚠️  [SYNC] No property documents in DB for listing {listing_id} - will delete existing chunks")
+                    chunks = []
                 
-                listings_with_docs_count += 1
+                db_doc_info = {}
+                for chunk in chunks:
+                    doc_id = chunk.metadata.get("doc_id") if chunk.metadata else None
+                    content_hash = chunk.metadata.get("content_hash") if chunk.metadata else None
+                    if doc_id:
+                        db_doc_info[str(doc_id)] = {
+                            "content_hash": content_hash,
+                            "total_chunks": chunk.metadata.get("total_chunks", 1) if chunk.metadata else 1
+                        }
                 
-                # Process documents for this listing
-                chunks = pdf_processor.process_property_documents(
-                    listing_id=listing_id,
-                    property_documents=property_docs
+                sync_result = vector_store.sync_property_documents(
+                    listing_id=str(listing_id),
+                    chunks=chunks,
+                    db_doc_info=db_doc_info
                 )
                 
-                if chunks:
-                    vector_store.add_chunks(chunks)
-                    total_chunks += len(chunks)
+                added_count = sync_result.get("added", 0)
+                deleted_count = sync_result.get("deleted", 0)
+                
+                total_chunks += added_count
+                if added_count > 0 or deleted_count > 0:
                     successful_listings += 1
             
             return {
