@@ -82,8 +82,17 @@ class PropertyRetriever:
         Args:
             vector_store: Optional PgVectorStore instance. If None, creates a new one.
         """
+        self._owns_vector_store = vector_store is None
         self.vector_store = vector_store or PgVectorStore()
         self._last_timings: Dict[str, float] = {}  # fine-grained timers from last retrieve call
+    
+    def close(self):
+        """Close the vector store if this retriever owns it."""
+        if self._owns_vector_store and self.vector_store:
+            try:
+                self.vector_store.close()
+            except Exception as e:
+                logger.warning("⚠️  Error closing vector store: %s", e)
     
     @asynccontextmanager
     async def _get_listing_repository(self):

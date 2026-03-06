@@ -74,6 +74,30 @@ class QueryAugmenter:
             self._generic_store = GenericKnowledgeStore()
         return self._generic_store
     
+    def close(self):
+        """Close all resources held by this augmenter."""
+        # Close the retriever (which will close its vector store if owned)
+        if hasattr(self, 'retriever') and self.retriever:
+            try:
+                self.retriever.close()
+            except Exception:
+                pass
+        
+        # Close the generic knowledge store if initialized
+        if self._generic_store is not None:
+            try:
+                self._generic_store.close()
+            except Exception:
+                pass
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensures cleanup."""
+        self.close()
+    
     async def augment_query(
         self,
         query: str,

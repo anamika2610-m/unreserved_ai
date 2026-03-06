@@ -45,6 +45,26 @@ def get_generator() -> ResponseGenerator:
     return _generator
 
 
+def close_generator() -> None:
+    """
+    Close the singleton ResponseGenerator and release all database connections.
+    
+    CRITICAL: This must be called during application shutdown to prevent
+    "idle in transaction" connections. The singleton holds a PgVectorStore
+    which holds a database session that must be explicitly closed.
+    """
+    global _generator
+    if _generator is not None:
+        try:
+            logger.info("Closing singleton ResponseGenerator...")
+            _generator.close()
+            logger.info("✓ ResponseGenerator closed successfully")
+        except Exception as e:
+            logger.warning("⚠️  Error closing ResponseGenerator: %s", e)
+        finally:
+            _generator = None
+
+
 # ------------------------------------------------------------------------------
 # Request / Response Models
 # ------------------------------------------------------------------------------

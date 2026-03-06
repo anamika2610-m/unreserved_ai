@@ -4,6 +4,7 @@ Voice transcription and text-to-speech API endpoints.
 - Converts text to speech using ElevenLabs TTS
 """
 import os
+import logging
 import tempfile
 from pathlib import Path
 
@@ -33,6 +34,8 @@ ELEVENLABS_VOICE_ID = "56bWURjYFHyYyVf490Dp"
 ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1"
 
 router = APIRouter(prefix="/api/v1/voice", tags=["voice"])
+
+logger = logging.getLogger(__name__)
 
 class TranscriptionResponse(BaseModel):
     """Response model for voice transcription."""
@@ -97,7 +100,7 @@ async def transcribe_voice(
             temp_file.write(content)
             temp_file.flush()
         
-        print(f"📝 Transcribing audio file: {file.filename} ({len(content)} bytes)")
+        logger.info("Transcribing audio file: %s (%d bytes)", file.filename, len(content))
         
         # Transcribe using OpenAI Whisper
         try:
@@ -121,9 +124,9 @@ async def transcribe_voice(
                 detected_language = getattr(transcription, 'language', None)
                 duration = getattr(transcription, 'duration', None)
             
-            print(f"✅ Transcription successful: {len(transcribed_text)} characters")
+            logger.info("Transcription successful: %d characters", len(transcribed_text))
             if detected_language:
-                print(f"   Detected language: {detected_language}")
+                logger.info("Detected language: %s", detected_language)
             
             return TranscriptionResponse(
                 text=transcribed_text,
@@ -132,8 +135,8 @@ async def transcribe_voice(
             )
         
         except Exception as e:
-            print(f"❌ Transcription failed: {e}")
-            print(traceback.format_exc())
+            logger.error("Transcription failed: %s", e)
+            logger.error(traceback.format_exc())
             raise InternalServerError(detail=f"Transcription failed: {str(e)}")
     
     finally:
@@ -141,9 +144,9 @@ async def transcribe_voice(
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.unlink(temp_file_path)
-                print(f"🗑️  Deleted temporary file: {temp_file_path}")
+                logger.info("Deleted temporary file: %s", temp_file_path)
             except Exception as e:
-                print(f"⚠️  Warning: Could not delete temporary file {temp_file_path}: {e}")
+                logger.warning("Could not delete temporary file %s: %s", temp_file_path, e)
                 # Try to delete on next attempt (best effort)
                 try:
                     import atexit
@@ -201,8 +204,8 @@ async def transcribe_and_chat(
     from app.db.connection import get_session_maker
     session_maker = get_session_maker()
     
-    async with session_maker() as db:
-        try:
+    try:
+        async with session_maker() as db:
             # First, transcribe the audio
             transcription_result = await transcribe_voice(request, file)
             transcribed_text = transcription_result.text
@@ -232,14 +235,21 @@ async def transcribe_and_chat(
                 },
                 "chat_response": chat_response.dict(),
             }
-        
-        except Exception as e:
-            print(f"❌ Chat processing failed: {e}")
-            print(traceback.format_exc())
-            raise HTTPException(
-                status_code=500,
-                detail=f"Chat processing failed: {str(e)}"
-            )
+    
+    except Exception as e:
+        logger.error("Chat processing failed: %s", e)
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Chat processing failed: {str(e)}"
+        )
+    finally:
+        # CRITICAL: Always close the generator to release database connections
+        if generator:
+            try:
+                generator.close()
+            except Exception:
+                pass
 
 
 class TextToSpeechRequest(BaseModel):
@@ -314,7 +324,7 @@ async def text_to_speech(
     if len(body.text) > 5000:
         raise BadRequestError(detail="Text length exceeds maximum of 5000 characters")
 
-    print(f"🔊 Converting text to speech (ElevenLabs): {len(body.text)} chars, format={format}")
+    logger.info("Converting text to speech (ElevenLabs): %d chars, format=%s", len(body.text), format)
 
     url = f"{ELEVENLABS_API_BASE}/text-to-speech/{ELEVENLABS_VOICE_ID}"
     headers = {
@@ -337,7 +347,7 @@ async def text_to_speech(
         )
         resp.raise_for_status()
         audio_data = resp.content
-        print(f"✅ TTS successful: {len(audio_data)} bytes generated")
+        logger.info("TTS successful: %d bytes generated", len(audio_data))
 
         content_types = {"mp3": "audio/mpeg", "opus": "audio/opus"}
         content_type = content_types.get(format, "audio/mpeg")
@@ -353,12 +363,12 @@ async def text_to_speech(
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else 500
         body = (e.response.text or str(e)) if e.response is not None else str(e)
-        print(f"❌ TTS failed (HTTP {status}): {body}")
+        logger.error("TTS failed (HTTP %d): %s", status, body)
         if status >= 500:
             raise ServiceUnavailableError(detail=f"Text-to-speech failed: {body[:500]}")
         raise BadRequestError(detail=f"Text-to-speech failed: {body[:500]}")
     except Exception as e:
-        print(f"❌ TTS failed: {e}")
-        print(traceback.format_exc())
+        logger.error("TTS failed: %s", e)
+        logger.error(traceback.format_exc())
         raise InternalServerError(detail=f"Text-to-speech conversion failed: {str(e)}")
 

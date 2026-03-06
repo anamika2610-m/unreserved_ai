@@ -108,6 +108,22 @@ class ResponseGenerator:
         self.model_name = get_model_name()
         self.tone_service = ToneAdaptationService()
     
+    def close(self):
+        """Close the response generator and release all resources."""
+        if hasattr(self, 'augmenter') and self.augmenter:
+            try:
+                self.augmenter.close()
+            except Exception as e:
+                logger.warning("⚠️  Error closing augmenter: %s", e)
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensures cleanup."""
+        self.close()
+    
     async def _do_conversational_reply(
         self,
         query: str,
