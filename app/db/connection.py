@@ -88,6 +88,9 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
     session_maker = get_session_maker()
     async with session_maker() as session:
+        # Track this session for monitoring
+        AsyncConnectionManager.track_session(session)
+        
         try:
             yield session
             await session.commit()
@@ -96,7 +99,13 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             logger.error("Async database session error: %s", e)
             raise
         finally:
-            await session.close()
+            try:
+                await session.close()
+            except Exception:
+                pass
+            finally:
+                # Untrack session after cleanup
+                AsyncConnectionManager.untrack_session(session)
 
 
 async def init_db():
@@ -126,8 +135,11 @@ async def close_db():
     """
     global engine
     if engine is not None:
-        await engine.dispose()
-    logger.info("Async database connections closed")
+        try:
+            await engine.dispose()
+            logger.info("✓ Async database engine disposed")
+        except Exception as e:
+            logger.warning("⚠️  Error disposing async engine: %s", e)
 
 
 async def check_db_connection() -> bool:
@@ -144,4 +156,92 @@ async def check_db_connection() -> bool:
     except Exception as e:
         logger.error("Async database health check failed: %s", e)
         return False
+
+
+# -----------------------------------------------------------------------------
+# Async Connection Management Utilities
+# -----------------------------------------------------------------------------
+
+class AsyncConnectionManager:
+    """
+    Centralized database connection manager for async connections.
+    
+    This class provides utilities for managing database connections
+    and ensures proper cleanup of resources.
+    """
+    
+    _active_sessions: set = set()
+    
+    @classmethod
+    def track_session(cls, session: AsyncSession) -> AsyncSession:
+        """Track an active session for cleanup monitoring."""
+        cls._active_sessions.add(id(session))
+        return session
+    
+    @classmethod
+    def untrack_session(cls, session: AsyncSession) -> None:
+        """Untrack a session after cleanup."""
+        cls._active_sessions.discard(id(session))
+    
+    @classmethod
+    def get_active_session_count(cls) -> int:
+        """Get the number of tracked active sessions."""
+        return len(cls._active_sessions)
+    
+    @classmethod
+    def force_cleanup_all(cls) -> None:
+        """Force cleanup of any remaining sessions (emergency use)."""
+        if cls._active_sessions:
+            logger.warning("⚠️  Force cleaning up %d tracked async sessions", len(cls._active_sessions))
+            cls._active_sessions.clear()
+
+
+async def close_all_connections() -> None:
+    """
+    Close ALL async database connections.
+    
+    This is the main entry point for connection cleanup during shutdown.
+    Call this in the application lifespan shutdown handler.
+    """
+    logger.info("🧹 Closing all async database connections...")
+    
+    # Force cleanup of any tracked sessions
+    AsyncConnectionManager.force_cleanup_all()
+    
+    # Dispose the engine
+    await close_db()
+    
+    logger.info("✓ All async database connections closed")
+
+
+async def shutdown_all_databases() -> None:
+    """
+    Shutdown ALL database connections (both sync and async).
+    
+    This is the MAIN entry point for complete database shutdown.
+    It closes both async and sync engines.
+    
+    Usage in main.py lifespan:
+        await shutdown_all_databases()
+    """
+    # Import sync connection module here to avoid circular imports
+    from app.db.session import close_all_connections as close_sync_connections
+    
+    logger.info("🧹 Shutting down all database connections...")
+    
+    # 1. Close async connections first
+    await close_all_connections()
+    
+    # 2. Close sync connections
+    close_sync_connections()
+    
+    logger.info("✓ All database connections closed")
+
+
+# Export AsyncConnectionManager for use in other modules
+__all__ = [
+    'get_db', 'close_db', 'close_all_connections', 'shutdown_all_databases',
+    'check_db_connection', 'init_db', 'get_async_engine', 'get_session_maker',
+    'AsyncConnectionManager'
+]
 

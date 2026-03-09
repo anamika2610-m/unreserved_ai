@@ -3,8 +3,10 @@ API endpoints for syncing vector embeddings with database listings.
 These endpoints can be called via webhook when listings are added/updated.
 """
 import os
+import logging
 import shutil
 import tempfile
+import logging
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Header, UploadFile, File, Form
 
@@ -27,7 +29,10 @@ from app.helpers.ingestion_pipeline.generic.generic_knowledge_store import Gener
 from pathlib import Path
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/sync", tags=["sync"])
+
+logger = logging.getLogger(__name__)
 
 
 # Request/Response models
@@ -185,34 +190,32 @@ def perform_sync(
     chunker = PropertyListingChunker()
     all_chunks = chunker.chunk_all_listings(listings)
     
-    # Initialize pgvector store
-    vector_store = PgVectorStore(
-        embedding_model="text-embedding-3-small"
-    )
-    
-    # IMPORTANT: We no longer clear all embeddings from this endpoint.
-    # `clear_existing` is accepted for backwards compatibility, but ignored
-    # to ensure vector embeddings persist across syncs.
-    if clear_existing:
-        print(
-            "ℹ️  clear_existing was requested, but full reset of embeddings is "
-            "disabled to preserve existing vectors. Run a manual maintenance "
-            "job if you truly need to wipe the vector store."
-        )
-    
-    # Add chunks
-    vector_store.add_chunks(all_chunks)
-    
-    # Get final stats
-    stats = vector_store.get_stats()
-    
-    return {
-        "status": "success",
-        "message": f"Successfully synced {len(listings)} listings",
-        "listings_synced": len(listings),
-        "chunks_created": len(all_chunks),
-        "total_embeddings": stats["total_chunks"]
-    }
+    # Initialize pgvector store with context manager for proper cleanup
+    # CRITICAL: This ensures the database session is always closed
+    with PgVectorStore(embedding_model="text-embedding-3-small") as vector_store:
+        # IMPORTANT: We no longer clear all embeddings from this endpoint.
+        # `clear_existing` is accepted for backwards compatibility, but ignored
+        # to ensure vector embeddings persist across syncs.
+        if clear_existing:
+            logger.info(
+                "clear_existing was requested, but full reset of embeddings is "
+                "disabled to preserve existing vectors. Run a manual maintenance "
+                "job if you truly need to wipe the vector store."
+            )
+        
+        # Add chunks
+        vector_store.add_chunks(all_chunks)
+        
+        # Get final stats
+        stats = vector_store.get_stats()
+        
+        return {
+            "status": "success",
+            "message": f"Successfully synced {len(listings)} listings",
+            "listings_synced": len(listings),
+            "chunks_created": len(all_chunks),
+            "total_embeddings": stats["total_chunks"]
+        }
 
 
 async def _sync_listings_handler(
@@ -322,22 +325,20 @@ async def get_sync_status():
     Returns information about the collection including total embeddings count.
     """
     try:
-        vector_store = PgVectorStore(
-            embedding_model="all-MiniLM-L6-v2"
-        )
-        
-        stats = vector_store.get_stats()
-        
-        return SyncStatusResponse(
-            collection_name="property_embeddings",  # pgvector table name
-            total_embeddings=stats["total_chunks"],
-            embedding_model=stats["embedding_model"],
-            metadata={
-                "unique_listings": stats["unique_listings"],
-                "chunk_types": stats["chunk_types"],
-                "vector_dimension": stats["vector_dimension"]
-            }
-        )
+        # Use context manager to ensure PgVectorStore session is properly closed
+        with PgVectorStore(embedding_model="all-MiniLM-L6-v2") as vector_store:
+            stats = vector_store.get_stats()
+            
+            return SyncStatusResponse(
+                collection_name="property_embeddings",  # pgvector table name
+                total_embeddings=stats["total_chunks"],
+                embedding_model=stats["embedding_model"],
+                metadata={
+                    "unique_listings": stats["unique_listings"],
+                    "chunk_types": stats["chunk_types"],
+                    "vector_dimension": stats["vector_dimension"]
+                }
+            )
         
     except Exception as e:
         raise InternalServerError(detail=f"Failed to get status: {str(e)}")
@@ -402,20 +403,37 @@ async def perform_property_pdf_sync(listing_ids: Optional[List[str]] = None) -> 
                 listing_id = listing.get('id')
                 property_docs = await listing_repo.fetch_property_documents(listing_id)
                 
-                if not property_docs:
-                    continue
+                if property_docs:
+                    listings_with_docs_count += 1
+                    chunks = pdf_processor.process_property_documents(
+                        listing_id=listing_id,
+                        property_documents=property_docs
+                    )
+                else:
+                    logger.info(f"⚠️  [SYNC] No property documents in DB for listing {listing_id} - will delete existing chunks")
+                    chunks = []
                 
-                listings_with_docs_count += 1
+                db_doc_info = {}
+                for chunk in chunks:
+                    doc_id = chunk.metadata.get("doc_id") if chunk.metadata else None
+                    content_hash = chunk.metadata.get("content_hash") if chunk.metadata else None
+                    if doc_id:
+                        db_doc_info[str(doc_id)] = {
+                            "content_hash": content_hash,
+                            "total_chunks": chunk.metadata.get("total_chunks", 1) if chunk.metadata else 1
+                        }
                 
-                # Process documents for this listing
-                chunks = pdf_processor.process_property_documents(
-                    listing_id=listing_id,
-                    property_documents=property_docs
+                sync_result = vector_store.sync_property_documents(
+                    listing_id=str(listing_id),
+                    chunks=chunks,
+                    db_doc_info=db_doc_info
                 )
                 
-                if chunks:
-                    vector_store.add_chunks(chunks)
-                    total_chunks += len(chunks)
+                added_count = sync_result.get("added", 0)
+                deleted_count = sync_result.get("deleted", 0)
+                
+                total_chunks += added_count
+                if added_count > 0 or deleted_count > 0:
                     successful_listings += 1
             
             return {
@@ -545,7 +563,7 @@ def perform_generic_pdf_sync(re_index: bool = False) -> dict:
                 processed_docs += 1
                 
             except Exception as e:
-                print(f"Error processing {pdf_path}: {e}")
+                logger.error("Error processing %s: %s", pdf_path, e)
                 skipped_docs += 1
                 continue
         
@@ -587,7 +605,7 @@ async def sync_generic_pdfs_upload(
     # Check 1: Max file count limit
     if len(files) > max_files:
         error_msg = f"Too many files. Max allowed: {max_files}, received: {len(files)}"
-        print(f"❌ File upload rejected: {error_msg}")
+        logger.warning("File upload rejected: %s", error_msg)
         raise BadRequestError(detail=error_msg)
 
     # Check 2: File extension validation - reject if ANY non-PDF is found
@@ -601,7 +619,7 @@ async def sync_generic_pdfs_upload(
     
     if rejected_files:
         error_msg = f"Only PDF files are allowed. Rejected files: {', '.join(rejected_files)}"
-        print(f"❌ File upload rejected: {error_msg}")
+        logger.warning("File upload rejected: %s", error_msg)
         raise BadRequestError(detail=error_msg)
 
     # Only proceed if ALL validations pass
@@ -618,7 +636,7 @@ async def sync_generic_pdfs_upload(
             
             # Double-check validation (safety net)
             if not name or not name.lower().endswith(".pdf"):
-                print(f"⚠️  WARNING: Invalid file detected during processing: {name}")
+                logger.warning("Invalid file detected during processing: %s", name)
                 rejected += 1
                 continue
 
@@ -627,10 +645,10 @@ async def sync_generic_pdfs_upload(
                 _save_upload_to_disk(f, dest, max_bytes=max_bytes)
                 accepted_paths.append(dest)
             except ValueError as e:
-                print(f"⚠️  File rejected (size limit): {name}")
+                logger.warning("File rejected (size limit): %s", name)
                 rejected += 1
             except Exception as e:
-                print(f"⚠️  File rejected (error): {name} - {str(e)}")
+                logger.warning("File rejected (error): %s - %s", name, str(e))
                 rejected += 1
 
         if not accepted_paths:
@@ -687,7 +705,7 @@ async def sync_generic_pdfs_upload_async(
     # Check 1: Max file count limit
     if len(files) > max_files:
         error_msg = f"Too many files. Max allowed: {max_files}, received: {len(files)}"
-        print(f"❌ File upload rejected: {error_msg}")
+        logger.warning("File upload rejected: %s", error_msg)
         raise BadRequestError(detail=error_msg)
 
     # Check 2: File extension validation - reject if ANY non-PDF is found
@@ -701,7 +719,7 @@ async def sync_generic_pdfs_upload_async(
     
     if rejected_files:
         error_msg = f"Only PDF files are allowed. Rejected files: {', '.join(rejected_files)}"
-        print(f"❌ File upload rejected: {error_msg}")
+        logger.warning("File upload rejected: %s", error_msg)
         raise BadRequestError(detail=error_msg)
 
     # Only proceed if ALL validations pass
@@ -716,7 +734,7 @@ async def sync_generic_pdfs_upload_async(
         
         # Double-check validation (safety net)
         if not name or not name.lower().endswith(".pdf"):
-            print(f"⚠️  WARNING: Invalid file detected during processing: {name}")
+            logger.warning("Invalid file detected during processing: %s", name)
             rejected += 1
             continue
             
@@ -725,10 +743,10 @@ async def sync_generic_pdfs_upload_async(
             _save_upload_to_disk(f, dest, max_bytes=max_bytes)
             accepted_paths.append(dest)
         except ValueError as e:
-            print(f"⚠️  File rejected (size limit): {name}")
+            logger.warning("File rejected (size limit): %s", name)
             rejected += 1
         except Exception as e:
-            print(f"⚠️  File rejected (error): {name} - {str(e)}")
+            logger.warning("File rejected (error): %s - %s", name, str(e))
             rejected += 1
 
     if not accepted_paths:
@@ -882,7 +900,7 @@ def perform_generic_pdf_sync_from_files(
                 processed_docs += 1
 
             except Exception as e:
-                print(f"Error processing uploaded PDF {pdf_path}: {e}")
+                logger.error("Error processing uploaded PDF %s: %s", pdf_path, e)
                 skipped_docs += 1
                 continue
 

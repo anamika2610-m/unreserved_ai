@@ -3,6 +3,7 @@ Database session management for SQLAlchemy.
 
 Provides engine, session factory, and FastAPI dependency for database connections.
 """
+import logging
 import time
 from typing import Generator, Optional
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
@@ -14,6 +15,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.settings import get_database_url as core_get_database_url, settings as app_settings
 from sqlalchemy.pool import QueuePool, NullPool
 import psycopg
+
+logger = logging.getLogger(__name__)
 
 
 # Constants
@@ -173,7 +176,7 @@ def set_postgresql_timeout(dbapi_conn, connection_record):
         cursor.close()
         dbapi_conn.commit()
     except Exception as e:
-        print(f"⚠️  Failed to set PostgreSQL timeouts: {e}")
+        logger.warning("Failed to set PostgreSQL timeouts: %s", e)
         try:
             cursor.close()
         except:
@@ -243,16 +246,19 @@ def get_db() -> Generator[Session, None, None]:
             break
         except (OperationalError, DisconnectionError) as e:
             if attempt < MAX_RETRIES - 1:
-                print(f"⚠️  Database connection attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
-                print(f"   Retrying in {retry_delay}s...")
+                logger.warning("Database connection attempt %d/%d failed: %s", attempt + 1, MAX_RETRIES, e)
+                logger.info("Retrying in %ds...", retry_delay)
                 time.sleep(retry_delay)
                 retry_delay *= 2  # Exponential backoff
             else:
-                print(f"❌ Database connection failed after {MAX_RETRIES} attempts")
+                logger.error("Database connection failed after %d attempts", MAX_RETRIES)
                 raise
     
     if db is None:
         raise RuntimeError("Failed to create database session")
+    
+    # Track this session for monitoring
+    ConnectionManager.track_session(db)
     
     try:
         yield db
@@ -268,7 +274,7 @@ def get_db() -> Generator[Session, None, None]:
             # Invalidate the connection pool to force new connections
             try:
                 engine.pool.invalidate()
-                print("⚠️  Connection pool invalidated due to closed connection")
+                logger.warning("Connection pool invalidated due to closed connection")
             except:
                 pass
         try:
@@ -288,7 +294,7 @@ def get_db() -> Generator[Session, None, None]:
         try:
             # Check if transaction is still active
             if db.in_transaction():
-                print("⚠️  Warning: Transaction still active in finally block, rolling back")
+                logger.warning("⚠️  Transaction still active in finally block, rolling back")
                 db.rollback()
         except:
             pass
@@ -297,12 +303,23 @@ def get_db() -> Generator[Session, None, None]:
             db.close()
         except:
             pass
+        finally:
+            # Untrack session after cleanup
+            ConnectionManager.untrack_session(db)
 
 
 def close_db():
-    """Close database connections (dispose pool). Call on application shutdown."""
+    """
+    Close sync database connections (dispose pool).
+    Call on application shutdown.
+    """
+    global engine
     if engine is not None:
-        engine.dispose()
+        try:
+            engine.dispose()
+            logger.info("✓ Sync database engine disposed")
+        except Exception as e:
+            logger.warning("⚠️  Error disposing sync engine: %s", e)
 
 
 def check_db_connection() -> bool:
@@ -312,7 +329,7 @@ def check_db_connection() -> bool:
             conn.execute(text("SELECT 1"))
         return True
     except Exception as e:
-        print(f"Database health check failed: {e}")
+        logger.warning("Database health check failed: %s", e)
         return False
 
 
@@ -323,4 +340,68 @@ def init_db():
     """
     # Tables are created by migration scripts; no-op here.
     pass
+
+
+# -----------------------------------------------------------------------------
+# Connection Management Utilities
+# -----------------------------------------------------------------------------
+
+class ConnectionManager:
+    """
+    Centralized database connection manager for sync connections.
+    
+    This class provides utilities for managing database connections
+    and ensures proper cleanup of resources.
+    """
+    
+    _active_sessions: set = set()
+    
+    @classmethod
+    def track_session(cls, session: Session) -> Session:
+        """Track an active session for cleanup monitoring."""
+        cls._active_sessions.add(id(session))
+        return session
+    
+    @classmethod
+    def untrack_session(cls, session: Session) -> None:
+        """Untrack a session after cleanup."""
+        cls._active_sessions.discard(id(session))
+    
+    @classmethod
+    def get_active_session_count(cls) -> int:
+        """Get the number of tracked active sessions."""
+        return len(cls._active_sessions)
+    
+    @classmethod
+    def force_cleanup_all(cls) -> None:
+        """Force cleanup of any remaining sessions (emergency use)."""
+        if cls._active_sessions:
+            logger.warning("⚠️  Force cleaning up %d tracked sessions", len(cls._active_sessions))
+            cls._active_sessions.clear()
+
+
+def close_all_connections() -> None:
+    """
+    Close ALL database connections (sync engine).
+    
+    This is the main entry point for connection cleanup during shutdown.
+    Call this in the application lifespan shutdown handler.
+    """
+    logger.info("🧹 Closing all sync database connections...")
+    
+    # Force cleanup of any tracked sessions
+    ConnectionManager.force_cleanup_all()
+    
+    # Dispose the engine
+    close_db()
+    
+    logger.info("✓ All sync database connections closed")
+
+
+# Export ConnectionManager for use in other modules
+__all__ = [
+    'SessionLocal', 'get_db', 'close_db', 'close_all_connections',
+    'check_db_connection', 'init_db', 'get_engine', 'get_session_maker',
+    'ConnectionManager'
+]
 
