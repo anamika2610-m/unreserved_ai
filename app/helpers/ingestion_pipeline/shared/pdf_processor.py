@@ -12,7 +12,7 @@ from dataclasses import dataclass
 # Constants
 DEFAULT_CHUNK_SIZE = 500
 DEFAULT_OVERLAP = 50
-DEFAULT_REQUEST_TIMEOUT = 30
+DEFAULT_REQUEST_TIMEOUT = 120  # seconds – large PDFs need more time to download
 PAGE_SEPARATOR_FORMAT = "\n--- Page {page_num} ---\n"
 
 
@@ -150,7 +150,7 @@ class PDFProcessor:
     
     def clean_text(self, text: str) -> str:
         """
-        Clean extracted text (remove extra whitespace, etc.)
+        Clean extracted text (remove extra whitespace, NUL bytes, etc.)
         
         Args:
             text: Raw extracted text
@@ -160,7 +160,10 @@ class PDFProcessor:
         """
         if not text or not isinstance(text, str):
             return ""
-        
+
+        # Strip NUL bytes – PostgreSQL TEXT fields do not accept \x00
+        text = text.replace('\x00', '')
+
         # Remove multiple newlines
         text = '\n'.join(line.strip() for line in text.split('\n') if line.strip())
         
@@ -190,16 +193,21 @@ class PDFProcessor:
         try:
             text = ""
             for page_num, page in enumerate(pdf_reader.pages, start=1):
-                page_text = page.extract_text()
-                if page_text:
+                page_text = page.extract_text() or ""
+                # Strip NUL bytes immediately after extraction; some PDFs embed
+                # binary content that PyPDF2 passes through as \x00 characters,
+                # which PostgreSQL TEXT fields reject.
+                page_text = page_text.replace('\x00', '')
+                if page_text.strip():
                     text += PAGE_SEPARATOR_FORMAT.format(page_num=page_num) + page_text
             
             if not text.strip():
                 print(f"⚠️  No text extracted from {source_name}")
                 return None
             
-            print(f"✓ Extracted {len(text)} characters from {source_name}")
-            return text.strip()
+            cleaned = self.clean_text(text)
+            print(f"✓ Extracted {len(cleaned)} characters from {source_name}")
+            return cleaned
         
         except (AttributeError, PyPDF2.errors.PdfReadError) as e:
             print(f"⚠️  PDF read error for {source_name}: {e}")

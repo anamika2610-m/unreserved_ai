@@ -2,8 +2,11 @@
 Property-Specific PDF Processor
 Processes PDFs from propertyDocuments JSON and adds to property_embeddings table
 """
+import logging
 from typing import List, Dict, Any
 from app.helpers.ingestion_pipeline.shared import PDFProcessor, Chunk
+
+logger = logging.getLogger(__name__)
 
 
 class PropertyPDFProcessor:
@@ -37,25 +40,28 @@ class PropertyPDFProcessor:
             List of Chunk objects ready for property_embeddings table
         """
         if not property_documents:
-            print(f"⚠️  No property documents for listing {listing_id}")
+            logger.warning("⚠️  No property documents for listing %s", listing_id)
             return []
         
         all_chunks = []
+        global_chunk_index = 0
         
         for doc in property_documents:
             try:
-                chunks = self._process_single_document(listing_id, doc)
+                chunks = self._process_single_document(listing_id, doc, global_chunk_index)
                 all_chunks.extend(chunks)
+                global_chunk_index += len(chunks)
             except Exception as e:
-                print(f"❌ Failed to process document {doc.get('id')}: {e}")
+                logger.error("❌ Failed to process document %s: %s", doc.get('id'), e)
         
-        print(f"✓ Processed {len(all_chunks)} chunks from {len(property_documents)} documents")
+        logger.info("✓ Processed %d chunks from %d documents", len(all_chunks), len(property_documents))
         return all_chunks
     
     def _process_single_document(
         self, 
         listing_id: str, 
-        doc: Dict[str, Any]
+        doc: Dict[str, Any],
+        global_chunk_index: int = 0
     ) -> List[Chunk]:
         """
         Process a single property document.
@@ -78,20 +84,20 @@ class PropertyPDFProcessor:
         content = None
         
         if file_type == 'pdf':
-            print(f"   📄 Extracting PDF: {file_name}")
+            logger.info("   📄 Extracting PDF: %s", file_name)
             content = self.pdf_processor.extract_from_url(file_url, file_name)
         
         elif file_type in ['jpeg', 'jpg', 'png', 'gif']:
             # For images, use alt text
             if alt_text:
-                print(f"   🖼️  Using alt text for image: {file_name}")
+                logger.info("   🖼️  Using alt text for image: %s", file_name)
                 content = f"[Image: {file_name}] {alt_text}"
             else:
-                print(f"   ⚠️  No alt text for image: {file_name}, skipping")
+                logger.warning("   ⚠️  No alt text for image: %s, skipping", file_name)
                 return []
         
         else:
-            print(f"   ⚠️  Unsupported file type '{file_type}' for: {file_name}")
+            logger.warning("   ⚠️  Unsupported file type '%s' for: %s", file_type, file_name)
             return []
         
         if not content:
@@ -116,7 +122,7 @@ class PropertyPDFProcessor:
                 "file_name": file_name,
                 "file_type": file_type,
                 "file_url": file_url,
-                "chunk_index": idx,
+                "chunk_index": global_chunk_index + idx,
                 "total_chunks": len(text_chunks),
                 "source": "property_document"
             }
@@ -124,7 +130,7 @@ class PropertyPDFProcessor:
             chunks.append(Chunk(
                 content=chunk_text,
                 chunk_type="property_document",  # New chunk type
-                chunk_index=idx,
+                chunk_index=global_chunk_index + idx,
                 listing_id=listing_id_str,  # Use string version
                 metadata=chunk_metadata
             ))
