@@ -101,13 +101,18 @@ class PropertyPDFProcessor:
             return []
         
         if not content:
+            logger.warning(f"   ⚠️  No content extracted from {file_name} - may be scanned/empty PDF")
             return []
         
         # Clean content
         content = self.pdf_processor.clean_text(content)
+        logger.info(f"   ✓ Cleaned content: {len(content)} chars")
         
         # Chunk content
         text_chunks = self.pdf_processor.chunk_text(content, overlap=50)
+        
+        if not text_chunks:
+            logger.warning(f"   ⚠️  No chunks generated from {file_name}")
         
         # Create Chunk objects for property_embeddings table
         chunks = []

@@ -249,16 +249,46 @@ def is_amenity_query(query: str) -> bool:
     # Exclude real estate market queries (market trends, price trends, market data, etc.)
     # These are about property market data, not shopping markets/amenities
     market_data_terms = [
+        # Market trends & conditions
         'market trend', 'market trends', 'price trend', 'price trends',
         'market data', 'market analysis', 'market insight', 'market insights',
         'market condition', 'market conditions', 'market value', 'market values',
         'market price', 'market prices', 'real estate market', 'property market',
         'housing market', 'market report', 'market reports', 'market forecast',
-        'market forecasts', 'market outlook', 'market performance', 'market statistics'
+        'market forecasts', 'market outlook', 'market performance', 'market statistics',
+        # Market tempo & activity
+        'market tempo', 'market activity', 'market sentiment', 'market cycle',
+        'how is the market', 'how\'s the market', 'how is market',
+        'market update', 'market news', 'market overview', 'market summary',
+        # Price-related
+        'price growth', 'price forecast', 'price prediction', 'price outlook',
+        'price history', 'price movement', 'price direction', 'price cycle',
+        'price index', 'price gauge', 'price indicator',
+        # Other market queries
+        'sold prices', 'sale price', 'sale prices', 'recent sales',
+        'buyer demand', 'seller demand', 'market demand', 'rental market',
+        'auction results', 'clearance rate', 'days on market'
     ]
     
     # If query is about real estate market data, it's NOT an amenity query
     if any(term in query_lower for term in market_data_terms):
+        return False
+    
+    # Exclude rental/tenancy queries that might mention amenity words (pet, gym, pool, etc.)
+    # These are about rental agreements, not finding nearby amenities
+    rental_terms = [
+        'rental agreement', 'tenancy agreement', 'lease agreement',
+        'tenancy', 'lease', 'renting', 'rent', 'tenant', 'landlord',
+        'renter', 'rental provider', 'property manager', 'letting agent',
+        'pet policy', 'pet clause', 'pet allowed', 'keeping a pet', 'pets allowed',
+        'consent to keep', 'request to keep', 'ask permission',
+        'bond', 'security deposit', 'lease term', 'tenancy term',
+        'break lease', 'lease break', 'end tenancy', 'vacate',
+        'rent increase', 'rent review', 'rent reduction'
+    ]
+    
+    # If query is about rental/tenancy, it's NOT an amenity query
+    if any(term in query_lower for term in rental_terms):
         return False
     
     # Exclude generic knowledge/regulatory queries (bushfire regulations, planning regulations, etc.)
@@ -321,6 +351,24 @@ def is_invalid_amenity_query(query: str) -> bool:
     
     # Check if query has location indicator but mentions invalid terms
     if any(term in query_lower for term in INVALID_TERMS):
+        return True
+    
+    # Check if query is about rental/tenancy - these are NOT valid amenity queries
+    # even if they mention words like "pet", "gym", "pool", etc.
+    rental_terms = [
+        'rental agreement', 'tenancy agreement', 'lease agreement',
+        'tenancy', 'lease', 'renting', 'rent', 'tenant', 'landlord',
+        'renter', 'rental provider', 'property manager', 'letting agent',
+        'pet policy', 'pet clause', 'pet allowed', 'keeping a pet', 'pets allowed',
+        'consent', 'ask permission', 'request to keep',
+        'bond', 'security deposit', 'lease term', 'tenancy term',
+        'break lease', 'lease break', 'end tenancy', 'vacate',
+        'rent increase', 'rent review', 'rent reduction',
+        'agreement', 'clause', 'term', 'condition'
+    ]
+    
+    # If query mentions rental terms, it's invalid for amenity purposes
+    if any(term in query_lower for term in rental_terms):
         return True
     
     return False
@@ -423,16 +471,44 @@ def detect_amenity_query(query: str) -> List[str]:
     
     # Exclude real estate market queries (market trends, price trends, market data, etc.)
     market_data_terms = [
+        # Market trends & conditions
         'market trend', 'market trends', 'price trend', 'price trends',
         'market data', 'market analysis', 'market insight', 'market insights',
         'market condition', 'market conditions', 'market value', 'market values',
         'market price', 'market prices', 'real estate market', 'property market',
         'housing market', 'market report', 'market reports', 'market forecast',
-        'market forecasts', 'market outlook', 'market performance', 'market statistics'
+        'market forecasts', 'market outlook', 'market performance', 'market statistics',
+        # Market tempo & activity
+        'market tempo', 'market activity', 'market sentiment', 'market cycle',
+        'how is the market', 'how\'s the market', 'how is market',
+        'market update', 'market news', 'market overview', 'market summary',
+        # Price-related
+        'price growth', 'price forecast', 'price prediction', 'price outlook',
+        'price history', 'price movement', 'price direction', 'price cycle',
+        'price index', 'price gauge', 'price indicator',
+        # Other market queries
+        'sold prices', 'sale price', 'sale prices', 'recent sales',
+        'buyer demand', 'seller demand', 'market demand', 'rental market',
+        'auction results', 'clearance rate', 'days on market'
     ]
     
     # If query is about real estate market data, return empty list
     if any(term in query_lower for term in market_data_terms):
+        return []
+    
+    # Exclude rental/tenancy queries that might mention amenity words
+    rental_terms = [
+        'rental agreement', 'tenancy agreement', 'lease agreement',
+        'tenancy', 'lease', 'renting', 'rent', 'tenant', 'landlord',
+        'renter', 'rental provider', 'property manager', 'letting agent',
+        'pet policy', 'pet clause', 'pet allowed', 'keeping a pet', 'pets allowed',
+        'consent to keep', 'request to keep', 'ask permission',
+        'bond', 'security deposit', 'lease term', 'tenancy term',
+        'break lease', 'lease break', 'end tenancy', 'vacate',
+        'rent increase', 'rent review', 'rent reduction'
+    ]
+    
+    if any(term in query_lower for term in rental_terms):
         return []
     
     matched_amenities = []

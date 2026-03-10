@@ -525,14 +525,15 @@ class PropertyRetriever:
         )
         
         logger.info("✅ vector_store.search returned %d results", len(results))
-        for i, r in enumerate(results[:5]):  # Show first 5
-            logger.debug(
-                "   [%d] chunk_type=%s, similarity=%.3f, listing_id=%s",
-                i + 1,
-                r.get('chunk_type', 'unknown'),
-                r.get('similarity', 0),
-                r.get('listing_id', 'N/A'),
-            )
+        # Log only high-similarity chunks (>= 0.5) with source doc
+        for i, r in enumerate(results):
+            similarity = r.get('similarity', 0)
+            if similarity >= 0.3:
+                chunk_type = r.get('chunk_type', 'unknown')
+                metadata = r.get('metadata', {})
+                source_doc = metadata.get('file_name', 'N/A') if metadata else 'N/A'
+                content_preview = r.get('content', '')[:80].replace('\n', ' ')
+                logger.info(f"   📄 Chunk {i+1}: type={chunk_type}, sim={similarity:.3f}, source=\"{source_doc}\" content=\"{content_preview}...\"")
 
         
         if allow_hybrid and listing_id:

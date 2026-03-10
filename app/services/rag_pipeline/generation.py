@@ -1,6 +1,7 @@
 """
 Generation module for creating AI responses to buyer enquiries.
 """
+import asyncio
 import logging
 import os
 import re
@@ -472,17 +473,38 @@ class ResponseGenerator:
                 timings_breakdown["display_price_db_ms"] = (time.perf_counter() - _t_db) * 1000.0
                     # Default to True (show price) if we can't fetch - safer default
                 
-                logger.info("🔍 Step 1/4: Trying property JSON chunks (listing_id: %s)", listing_id)
-                logger.debug(
-                    "           → This includes: overview, pricing, specifications, location chunks (excludes property_document)",
-                )
+                # ============================================================
+                # NEW APPROACH: PARALLEL RETRIEVAL - ALWAYS COMBINE JSON + PDFs
+                # This ensures PDF content is always available to the LLM
+                # ============================================================
+                
+                logger.info("🔍 PARALLEL RETRIEVAL: Getting JSON + PDF chunks together (listing_id: %s)", listing_id)
+                
                 _t = time.perf_counter()
-                property_json_context, property_json_data_sources, property_location_context = await self.augmenter.augment_query_json_chunks(
+                
+                # Run BOTH retrievals in parallel for speed + completeness
+                json_task = self.augmenter.augment_query_json_chunks(
                     query=query,
                     listing_id=listing_id,
                     n_results=n_retrieval_results
                 )
+                pdf_task = self.augmenter.augment_query_pdf_chunks(
+                    query=query,
+                    listing_id=listing_id,
+                    n_results=n_retrieval_results
+                )
+                
+                # Wait for both to complete
+                (
+                    (property_json_context, property_json_data_sources, property_location_context),
+                    (property_pdf_context, property_pdf_data_sources, _)
+                ) = await asyncio.gather(json_task, pdf_task)
+                
                 timings_breakdown["augment_json_ms"] = (time.perf_counter() - _t) * 1000.0
+                timings_breakdown["augment_pdf_ms"] = (time.perf_counter() - _t) * 1000.0
+                
+                logger.info("✅ PARALLEL RETRIEVAL complete: JSON=%d chunks, PDF=%d chunks",
+                    len(property_json_data_sources), len(property_pdf_data_sources))
                 
                 # 🚨 RETRIEVAL LAYER ENFORCEMENT: Filter out price chunks if displayPrice = false
                 if not display_price and enquiry_type == "price":
@@ -499,8 +521,6 @@ class ResponseGenerator:
                             filtered_count,
                         )
                         # Also remove pricing content from context
-                        import re
-                        # Remove pricing sections from context
                         property_json_context = re.sub(
                             r'=== PROPERTY LISTING:.*?===\s*\[PRICING\].*?(?=\[|===|$)',
                             '',
@@ -508,226 +528,44 @@ class ResponseGenerator:
                             flags=re.DOTALL
                         )
                 
-                # Check if property JSON data is sufficient
-                # IMPORTANT: Also check if location_context has nearby properties (even if no JSON chunks)
-                if property_json_data_sources or property_location_context:
-                    # For sufficiency check, we need at least an empty list if no data sources
-                    check_data_sources = property_json_data_sources if property_json_data_sources else []
-                    
-                    property_sufficient, insufficiency_reason = await self.augmenter.check_data_sufficiency(
-                        query=query,
-                        retrieved_context=property_json_context,
-                        data_sources=check_data_sources,
-                        location_context=property_location_context
-                    )
-                    
-                    if property_json_data_sources:
-                        logger.debug(
-                            "           → Found %d JSON chunks",
-                            len(property_json_data_sources),
-                        )
-                        top_similarity = (
-                            property_json_data_sources[0].similarity_score
-                            if property_json_data_sources[0].similarity_score is not None
-                            else 0.0
-                        )
-                        logger.debug("           → Top similarity: %.4f", top_similarity)
-                        logger.debug("           → Sufficient: %s", property_sufficient)
-                    elif property_location_context and property_location_context.get('nearby_properties_json'):
-                        # No JSON chunks but we have location context with nearby properties
-                        logger.debug(
-                            "           → No property JSON chunks found, but location_context has nearby properties",
-                        )
-                        logger.debug("           → Sufficient: %s", property_sufficient)
-                    else:
-                        logger.debug("           → No property JSON chunks found")
-                else:
-                    logger.debug("           → No property JSON chunks found")
-                    insufficiency_reason = "No property JSON chunks found"
+                # ============================================================
+                # ALWAYS COMBINE: JSON + PDF chunks together
+                # Let the LLM decide which source to use, don't block based on "sufficiency"
+                # ============================================================
                 
-                # 🚨 CRITICAL: Check if this is a "document query" (aerial view, bushfire, flood, etc.)
-                # For document queries, if JSON is insufficient, SKIP JSON and use ONLY property PDFs
-                query_lower = query.lower()
-                document_query_keywords = [
-                    'aerial view', 'aerial', 'bird eye', 'bird\'s eye',
-                    'bushfire', 'flood', 'erosion', 'heritage overlay',
-                    'planning overlay', 'environmental', 'disclosure',
-                    'vendor statement', 'section 32', 'contract'
-                ]
-                is_document_query = any(kw in query_lower for kw in document_query_keywords)
+                # Build combined context - JSON first (has structured data), then PDF (has detailed docs)
+                context_parts = []
+                data_sources = []
                 
-                # 🚨 CRITICAL: ALWAYS keep JSON data if it exists (especially pricing)
-                # JSON data from backend should NEVER be overridden by PDFs
-                # EXCEPTION: For document queries where JSON is insufficient, skip JSON and use ONLY PDFs
-                if property_json_data_sources:
-                    # If it's a document query AND JSON is insufficient → Skip JSON, use ONLY property PDFs
-                    if is_document_query and not property_sufficient:
-                        logger.info("⚠️  Step 1/4: JSON chunks found but INSUFFICIENT for document query")
-                        logger.debug("           → Reason: %s", insufficiency_reason)
-                        logger.info("🔍 Step 2/4: Skipping JSON → Trying ONLY property-specific PDFs (document query)")
-                        _t = time.perf_counter()
-                        property_pdf_context, property_pdf_data_sources, property_location_context = await self.augmenter.augment_query_pdf_chunks(
-                            query=query,
-                            listing_id=listing_id,
-                            n_results=n_retrieval_results
-                        )
-                        timings_breakdown["augment_pdf_ms"] = timings_breakdown.get("augment_pdf_ms", 0) + (time.perf_counter() - _t) * 1000.0
-                        
-                        # Check if property PDF data is sufficient
-                        if property_pdf_data_sources:
-                            property_sufficient, insufficiency_reason = await self.augmenter.check_data_sufficiency(
-                                query=query,
-                                retrieved_context=property_pdf_context,
-                                data_sources=property_pdf_data_sources,
-                                location_context=property_location_context
-                            )
-                            logger.debug(
-                                "           → Found %d PDF chunks",
-                                len(property_pdf_data_sources),
-                            )
-                            top_similarity = (
-                                property_pdf_data_sources[0].similarity_score
-                                if property_pdf_data_sources[0].similarity_score is not None
-                                else 0.0
-                            )
-                            logger.debug("           → Top similarity: %.4f", top_similarity)
-                            logger.debug("           → Sufficient: %s", property_sufficient)
-
-                            if property_sufficient:
-                                logger.info("✅ Step 2/4: Using ONLY property PDFs (JSON skipped for document query)")
-                                context = property_pdf_context  # Use ONLY PDFs, not JSON
-                                data_sources = property_pdf_data_sources
-                                location_context = property_location_context
-                                query_source = 'property'
-                            else:
-                                logger.info("⚠️  Step 2/4: Property PDF chunks insufficient")
-                                logger.debug("           → Reason: %s", insufficiency_reason)
-                                # Will fall through to generic or escalation
-                                context = ""
-                                data_sources = []
-                                location_context = None
-                        else:
-                            logger.debug("           → No property PDF chunks found")
-                            # Will fall through to generic or escalation
-                            context = ""
-                            data_sources = []
-                            location_context = None
-                    else:
-                        # Normal case: Use JSON as primary source
-                        logger.info("✅ Step 1/4: Property JSON chunks found → using JSON data as PRIMARY source")
-                        context = property_json_context
-                        data_sources = property_json_data_sources
-                        location_context = property_location_context
-                        query_source = 'property'
-                        
-                        # If JSON data is insufficient, SUPPLEMENT (not replace) with PDF data
-                        # BUT: Check if JSON context already contains the answer before supplementing
-                        json_context_lower = property_json_context.lower()
-                        
-                        # Check if JSON context already answers the query
-                        # For specific attribute queries (zoning, energy rating, etc.), if JSON has it, don't supplement
-                        backend_attribute_keywords = [
-                            'zoning', 'energy rating', 'frontage', 'car port', 'open parking', 
-                            'ensuite', 'year built', 'highlights', 'garage', 'car ports',
-                            'land area', 'floor area', 'land', 'bedroom', 'bathroom', 'garages',
-                            'ensuites', 'frontage', 'year built', 'energy'
-                        ]
-                        query_has_backend_attribute = any(kw in query_lower for kw in backend_attribute_keywords)
-                        # Check if JSON context contains the same keywords that are in the query
-                        json_has_answer = False
-                        if query_has_backend_attribute:
-                            matching_keywords = [kw for kw in backend_attribute_keywords if kw in query_lower]
-                            json_has_answer = any(kw in json_context_lower for kw in matching_keywords)
-                        
-                        if not property_sufficient and not (query_has_backend_attribute and json_has_answer):
-                            logger.info("⚠️  Step 1/4: JSON data found but may be insufficient for full answer")
-                            logger.debug("           → Reason: %s", insufficiency_reason)
-                            logger.info("🔍 Step 2/4: Trying property-specific PDFs to SUPPLEMENT JSON data")
-                            _t = time.perf_counter()
-                            property_pdf_context, property_pdf_data_sources, _ = await self.augmenter.augment_query_pdf_chunks(
-                                query=query,
-                                listing_id=listing_id,
-                                n_results=n_retrieval_results
-                            )
-                            timings_breakdown["augment_pdf_ms"] = timings_breakdown.get("augment_pdf_ms", 0) + (time.perf_counter() - _t) * 1000.0
-                            
-                            if property_pdf_data_sources:
-                                logger.debug(
-                                    "           → Found %d PDF chunks to supplement",
-                                    len(property_pdf_data_sources),
-                                )
-                                # SUPPLEMENT JSON context with PDF context (not replace)
-                                context = property_json_context + "\n\n" + property_pdf_context
-                                # Add PDF sources AFTER JSON sources (JSON has priority)
-                                data_sources = property_json_data_sources + property_pdf_data_sources
-                                logger.info("✅ Step 2/4: Combined JSON + PDF data (JSON takes priority)")
-                                property_sufficient = True  # Combined data should be sufficient
-                            else:
-                                logger.debug("           → No property PDF chunks found to supplement")
-                        elif query_has_backend_attribute and json_has_answer:
-                            logger.info(
-                                "✅ Step 1/4: JSON data contains answer for backend attribute query - NOT supplementing with PDFs",
-                            )
-                            # Use JSON data only - don't supplement with PDFs
+                if property_json_context and property_json_context.strip():
+                    context_parts.append(property_json_context)
+                    data_sources.extend(property_json_data_sources)
+                    logger.info("   📄 Including JSON chunks: %d", len(property_json_data_sources))
+                
+                if property_pdf_context and property_pdf_context.strip():
+                    context_parts.append(property_pdf_context)
+                    property_pdf_filtered = [
+                        ds for ds in property_pdf_data_sources 
+                        if ds.chunk_type == 'property_document'
+                    ]
+                    data_sources.extend(property_pdf_filtered)
+                    logger.info("   📄 Including PDF chunks: %d", len(property_pdf_filtered))
+                
+                # Combine both contexts
+                context = "\n\n".join(context_parts)
+                query_source = 'property'
+                property_sufficient = len(data_sources) > 0
+                
+                if property_sufficient:
+                    logger.info("✅ Combined context: JSON + PDF = %d total chunks", len(data_sources))
                 else:
-                    # Check if we already have sufficient data from location_context (e.g., nearby properties)
-                    if property_sufficient and property_location_context and property_location_context.get('nearby_properties_json'):
-                        logger.info(
-                            "✅ Step 1/4: No JSON chunks BUT location_context has nearby properties → Data SUFFICIENT",
-                        )
-                        # Use location context data even without traditional chunks
-                        context = ""  # No text context needed for nearby properties
-                        data_sources = []  # No traditional data sources, but we have location_context
-                        location_context = property_location_context
-                        query_source = 'property'
-                    else:
-                        logger.info("⚠️  Step 1/4: No Property JSON chunks found")
-                        logger.debug("           → Reason: %s", insufficiency_reason)
-
-                        # Step 2/4: Try property-specific PDFs (only if NO JSON data exists)
-                        logger.info("🔍 Step 2/4: No JSON data → Trying property-specific PDFs (property_document chunks)")
-                        _t = time.perf_counter()
-                        property_pdf_context, property_pdf_data_sources, property_location_context = await self.augmenter.augment_query_pdf_chunks(
-                            query=query,
-                            listing_id=listing_id,
-                            n_results=n_retrieval_results
-                        )
-                        timings_breakdown["augment_pdf_ms"] = timings_breakdown.get("augment_pdf_ms", 0) + (time.perf_counter() - _t) * 1000.0
-                        
-                        # Check if property PDF data is sufficient
-                        if property_pdf_data_sources:
-                            property_sufficient, insufficiency_reason = await self.augmenter.check_data_sufficiency(
-                                query=query,
-                                retrieved_context=property_pdf_context,
-                                data_sources=property_pdf_data_sources,
-                                location_context=property_location_context
-                            )
-                            logger.debug(
-                                "           → Found %d PDF chunks",
-                                len(property_pdf_data_sources),
-                            )
-                            top_similarity = (
-                                property_pdf_data_sources[0].similarity_score
-                                if property_pdf_data_sources[0].similarity_score is not None
-                                else 0.0
-                            )
-                            logger.debug("           → Top similarity: %.4f", top_similarity)
-                            logger.debug("           → Sufficient: %s", property_sufficient)
-                        else:
-                            logger.debug("           → No property PDF chunks found")
-                            insufficiency_reason = "No property PDF chunks found"
-                        
-                        if property_sufficient and property_pdf_data_sources:
-                            logger.info("✅ Step 2/4: Property PDF chunks sufficient → using PDF data")
-                            context = property_pdf_context
-                            data_sources = property_pdf_data_sources
-                            location_context = property_location_context
-                            query_source = 'property'
-                        else:
-                            logger.info("⚠️  Step 2/4: Property PDF chunks insufficient")
-                            logger.debug("           → Reason: %s", insufficiency_reason)
+                    logger.warning("⚠️ No property chunks found (neither JSON nor PDF)")
             else:
-                logger.info("🔍 No listing_id provided → skipping property data (Steps 1-2/4)")
+                logger.info("🔍 No listing_id provided → skipping property data")
+                # Initialize for the generic fallback check
+                property_json_data_sources = []
+                property_pdf_data_sources = []
+                property_location_context = None
             
             # Step 3/4: Try generic knowledge as fallback (if property data insufficient)
             generic_context = ""
@@ -777,12 +615,16 @@ class ResponseGenerator:
                     logger.info("⚠️  Step 3/4: No generic knowledge found")
             
             # Step 4/4: If all previous steps failed, escalate to vendor
-            # UNLESS listing has lat/lon → we can answer amenity queries (e.g. nearby police stations) with Google Maps links
+            # UNLESS listing has lat/lon AND query is an amenity query → we can answer amenity queries with Google Maps links
             has_location_data = property_location_context and property_location_context.get('nearby_properties_json')
             if not property_sufficient or (not property_json_data_sources and not property_pdf_data_sources and not has_location_data):
                 if not (generic_data_sources and generic_context and generic_context.strip()):
+                    # Check if this is actually an amenity query before generating amenity links
+                    query_is_amenity = is_amenity_query(query)
+                    logger.info(f"🔍 Step 4/4: Checking amenity links - is_amenity_query: {query_is_amenity}")
+                    
                     skip_escalation_for_amenity_links = False
-                    if listing_id:
+                    if listing_id and query_is_amenity:
                         try:
                             from app.db.postgres.repositories.listing_repository import ListingRepository
                             async_session_maker = get_session_maker()
@@ -799,7 +641,7 @@ class ResponseGenerator:
                                         "The user is asking about nearby amenities (e.g. police stations, schools, hospitals). "
                                         "Use the Google Maps links provided below to direct them."
                                     )
-                                    logger.info("🗺️  Step 4/4: Listing has coordinates → skipping vendor escalation, will use amenity links")
+                                    logger.info("🗺️  Step 4/4: Query is amenity-related + listing has coordinates → using amenity links")
                         except Exception as e:
                             logger.debug("Step 4/4: Could not fetch listing location: %s", e)
 

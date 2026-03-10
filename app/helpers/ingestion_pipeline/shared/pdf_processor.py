@@ -137,15 +137,14 @@ class PDFProcessor:
         
         chunks = []
         i = 0
+        
         while i < len(words):
             chunk_words = words[i:i + self.chunk_size]
             chunk_text = " ".join(chunk_words)
             chunks.append(chunk_text)
-            
-            # Move forward with overlap
             i += self.chunk_size - overlap
         
-        print(f"✓ Created {len(chunks)} chunks from text")
+        print(f"✓ Created {len(chunks)} chunks from {len(words)} words")
         return chunks
     
     def clean_text(self, text: str) -> str:
@@ -192,12 +191,12 @@ class PDFProcessor:
         """
         try:
             text = ""
+            total_pages = len(pdf_reader.pages)
+            
             for page_num, page in enumerate(pdf_reader.pages, start=1):
                 page_text = page.extract_text() or ""
-                # Strip NUL bytes immediately after extraction; some PDFs embed
-                # binary content that PyPDF2 passes through as \x00 characters,
-                # which PostgreSQL TEXT fields reject.
                 page_text = page_text.replace('\x00', '')
+                
                 if page_text.strip():
                     text += PAGE_SEPARATOR_FORMAT.format(page_num=page_num) + page_text
             
@@ -206,7 +205,7 @@ class PDFProcessor:
                 return None
             
             cleaned = self.clean_text(text)
-            print(f"✓ Extracted {len(cleaned)} characters from {source_name}")
+            print(f"✓ Extracted {len(cleaned)} characters from {source_name} ({total_pages} pages)")
             return cleaned
         
         except (AttributeError, PyPDF2.errors.PdfReadError) as e:
