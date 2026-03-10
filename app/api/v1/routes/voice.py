@@ -28,6 +28,7 @@ import io
 import requests
 
 from app.services.rag_pipeline.llms import get_llm_client
+from app.services.rag_pipeline.postprocess import clean_text_for_tts
 
 # ElevenLabs TTS: default voice and API base
 ELEVENLABS_VOICE_ID = "56bWURjYFHyYyVf490Dp"
@@ -331,7 +332,7 @@ async def text_to_speech(
         "Accept": "audio/mpeg" if format == "mp3" else "audio/opus",
     }
     payload = {
-        "text": body.text,
+        "text": clean_text_for_tts(body.text),
         "model_id": "eleven_multilingual_v2",
         "output_format": ELEVENLABS_OUTPUT_FORMATS[format],
     }

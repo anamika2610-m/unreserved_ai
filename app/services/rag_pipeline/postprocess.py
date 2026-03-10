@@ -208,3 +208,64 @@ def sanitize_response(ai_response: AIResponse) -> AIResponse:
     
     return ai_response
 
+
+def clean_text_for_tts(text: str) -> str:
+    """
+    Clean text for Text-to-Speech output.
+    Removes HTML, converts markdown links to readable text, and removes 
+    raw URLs to ensure natural-sounding TTS output.
+    
+    Args:
+        text: The raw text from AI response
+        
+    Returns:
+        Cleaned text suitable for TTS
+    """
+    if not text:
+        return text
+    
+    cleaned = text
+    
+    # 1. Remove HTML tags
+    cleaned = re.sub(r'<[^>]+>', '', cleaned)
+    
+    # 2. Convert markdown links [text](url) to "text link"
+    # Pattern matches [anchor text](URL)
+    cleaned = re.sub(
+        r'\[([^\]]+)\]\([^)]+\)',
+        r'\1 link',
+        cleaned
+    )
+    
+    # 3. Remove raw URLs (http, https, www patterns)
+    # Matches http://, https://, www. followed by domain
+    url_pattern = r'(?:https?://|www\.)[^\s\)>\]\'"]+'
+    cleaned = re.sub(url_pattern, 'link', cleaned)
+    
+    # 4. Remove markdown formatting while keeping content
+    # Bold: **text** or __text__ → text
+    cleaned = re.sub(r'\*\*([^\*]+)\*\*', r'\1', cleaned)
+    cleaned = re.sub(r'__([^_]+)__', r'\1', cleaned)
+    
+    # Italic: *text* or _text_ → text (but not already bold)
+    cleaned = re.sub(r'(?<!\*)\*([^\*]+)\*(?!\*)', r'\1', cleaned)
+    cleaned = re.sub(r'(?<!_)_([^_]+)_(?!_)', r'\1', cleaned)
+    
+    # 5. Remove markdown headers (# Header → Header)
+    cleaned = re.sub(r'^#+\s*', '', cleaned, flags=re.MULTILINE)
+    
+    # 6. Remove markdown list markers (- item → item)
+    cleaned = re.sub(r'^[\-\*]\s+', '', cleaned, flags=re.MULTILINE)
+    
+    # 7. Remove markdown blockquotes (> quote → quote)
+    cleaned = re.sub(r'^>\s*', '', cleaned, flags=re.MULTILINE)
+    
+    # 8. Clean up extra whitespace
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    cleaned = re.sub(r' {2,}', ' ', cleaned)
+    
+    # 9. Remove any remaining markdown link remnants (in case of edge cases)
+    cleaned = re.sub(r'\[([^\]]*)\](?!\()', r'\1', cleaned)
+    
+    return cleaned.strip()
+
