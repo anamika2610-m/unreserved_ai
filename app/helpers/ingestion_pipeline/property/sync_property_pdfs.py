@@ -165,20 +165,22 @@ def _process_listing_documents(
         logger.info("      - %s: %d", file_type, count)
     
     try:
+        # Build db_doc_info from the DB query results (not from generated chunks).
+        # This ensures that a transient extraction failure for a PDF does NOT mark
+        # its existing chunks as orphans and delete them. Only docs truly removed
+        # from property_media will be treated as orphans.
+        db_doc_info = {}
+        for doc in property_docs:
+            doc_id = doc.get("id")
+            if doc_id:
+                db_doc_info[str(doc_id)] = {"total_chunks": 0}
+
         # Process documents
         chunks = pdf_processor.process_property_documents(listing_id, property_docs)
         
         if not chunks:
             logger.warning("   ⚠️  No chunks generated")
             return 0
-        
-        db_doc_info = {}
-        for chunk in chunks:
-            doc_id = chunk.metadata.get("doc_id") if chunk.metadata else None
-            if doc_id:
-                db_doc_info[str(doc_id)] = {
-                    "total_chunks": chunk.metadata.get("total_chunks", 1) if chunk.metadata else 1
-                }
         
         # Use efficient sync with list comparison
         logger.info("   💾 Syncing %d chunks to property_embeddings...", len(chunks))

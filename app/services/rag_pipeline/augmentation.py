@@ -309,7 +309,117 @@ class QueryAugmenter:
         )
         
         return augmented_context, data_sources, location_context
-    
+
+    def keyword_search_chunks(
+        self,
+        listing_id: str,
+        keywords: List[str],
+        max_per_keyword: int = 2,
+    ) -> Tuple[str, List[DataSource]]:
+        """
+        Search property_document chunks by plain-text keyword (SQL ILIKE) for a given listing.
+
+        Used to boost chunks that directly mention an address or proper noun from the query,
+        even when cosine-similarity ranking doesn't surface them at the top.
+
+        Returns a formatted context string and a list of DataSource entries.
+        """
+        from app.db.session import SessionLocal
+
+        if not keywords or not listing_id:
+            return "", []
+
+        try:
+            db = SessionLocal()
+            results: List[Dict[str, Any]] = []
+            seen_ids: set = set()
+
+            for keyword in keywords:
+                if len(keyword) < 4:
+                    continue
+                rows = db.execute(
+                    text("""
+                        SELECT id, listing_id, chunk_type, chunk_index, content
+                        FROM property_embeddings
+                        WHERE listing_id = :listing_id
+                          AND chunk_type = 'property_document'
+                          AND LOWER(content) LIKE LOWER(:pattern)
+                        ORDER BY chunk_index
+                        LIMIT :lim
+                    """),
+                    {
+                        "listing_id": listing_id,
+                        "pattern": f"%{keyword}%",
+                        "lim": max_per_keyword,
+                    },
+                ).fetchall()
+
+                for row in rows:
+                    row_id = row[0]
+                    if row_id not in seen_ids:
+                        seen_ids.add(row_id)
+                        results.append(
+                            {
+                                "id": row_id,
+                                "listing_id": row[1],
+                                "chunk_type": row[2],
+                                "chunk_index": row[3],
+                                "content": row[4],
+                            }
+                        )
+
+            db.close()
+
+            if not results:
+                return "", []
+
+            context_parts: List[str] = []
+            data_sources: List[DataSource] = []
+
+            for r in results:
+                content = r["content"] or ""
+                # Extract a focused snippet around each keyword match so the LLM
+                # can immediately locate the relevant sentence rather than having
+                # to scan a large chunk.  Fall back to the full chunk if no match.
+                snippet = content
+                for kw in keywords:
+                    idx = content.lower().find(kw.lower())
+                    if idx != -1:
+                        # Take ~3 sentences of context around the match
+                        start = max(0, idx - 300)
+                        end = min(len(content), idx + 500)
+                        # Expand to sentence boundaries where possible
+                        while start > 0 and content[start] not in ".!?\n":
+                            start -= 1
+                        while end < len(content) and content[end] not in ".!?\n":
+                            end += 1
+                        snippet = content[start:end].strip()
+                        break
+
+                context_parts.append(
+                    f"[PROPERTY_DOCUMENT - address match for '{kw}']\n{snippet}"
+                )
+                data_sources.append(
+                    DataSource(
+                        chunk_type="property_document",
+                        listing_id=listing_id,
+                        content_preview=(snippet or "")[:200],
+                        similarity_score=1.0,
+                    )
+                )
+
+            logger.info(
+                "keyword_search_chunks: found %d chunks for keywords %s (listing %s)",
+                len(results),
+                keywords,
+                listing_id,
+            )
+            return "\n\n".join(context_parts), data_sources
+
+        except Exception as exc:
+            logger.warning("keyword_search_chunks failed: %s", exc)
+            return "", []
+
     async def check_data_sufficiency(
         self,
         query: str,

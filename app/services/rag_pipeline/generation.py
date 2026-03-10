@@ -38,6 +38,7 @@ from app.services.rag_pipeline.preprocess import detect_enquiry_type, detect_que
 from app.services.rag_pipeline.postprocess import sanitize_response
 from app.services.rag_pipeline.google_maps_links import (
     generate_context_aware_links,
+    generate_custom_search_link,
     is_amenity_query,
     is_invalid_amenity_query,
 )
@@ -85,10 +86,21 @@ INVALID_AMENITY_TERMS = [
 
 # Queries that ask about inspection times/slots for a listing → we fetch from listing_inspections
 INSPECTION_QUERY_KEYWORDS = [
+    # Explicit inspection phrases
     'inspection slot', 'inspection slots', 'inspection time', 'inspection times',
     'inspection schedule', 'inspection dates', 'when can i inspect', 'when to inspect',
     'open for inspection', 'book inspection', 'book a viewing', 'closest to be booked',
     'which inspection', 'next inspection', 'upcoming inspection', 'viewing times',
+    # Open home / open house / open times (common natural language)
+    'open time', 'open times', 'open day', 'open days', 'open house', 'open homes',
+    'opening time', 'opening times', 'opening day', 'opening days',
+    'when is it open', 'when are the opens', 'when can i view',
+    'when can i visit', 'when can i see', 'can i view', 'can i visit',
+    'viewing', 'viewings', 'home open', 'home opens',
+    # Generic "when" queries about property access
+    'when is the inspection', 'when are the inspections',
+    'scheduled inspection', 'scheduled inspections',
+    'private inspection', 'private inspections',
 ]
 
 # Tone adaptation only when user is sufficiently conversational (has asked at least this many questions)
@@ -274,8 +286,11 @@ class ResponseGenerator:
             logger.debug("   First source similarity: %.4f", top_sim)
             return (None, generic_context, generic_data_sources, None, 'generic')
 
-        # Generic query but no results - provide fallback
-        logger.info("⚠️  Generic query returned no results → providing fallback message")
+        # Generic query but no results from generic KB.
+        # Note: this path is only reached when there is no listing_id (or is_strong_generic).
+        # When listing_id is present, routing sends the query to the property-first cascade
+        # which handles generic KB fallback internally via similarity thresholds.
+        logger.info("⚠️  Generic query returned no results from generic KB")
         logger.debug(
             "   Debug: generic_data_sources=%d, context_length=%d",
             len(generic_data_sources) if generic_data_sources else 0,
@@ -283,8 +298,7 @@ class ResponseGenerator:
         )
         _trend_kw = (
             'price trend', 'price trends', 'market trend', 'market trends',
-            'trends for this area', 'price trends for', 'market trends for',
-            'trends in this area', 'trends in the area', 'trend in',
+            'trends for this area', 'trends in this area', 'trends in the area',
         )
         is_trend = any(kw in query.lower() for kw in _trend_kw)
         if is_enquiry_message:
@@ -392,29 +406,29 @@ class ResponseGenerator:
         )
         timings_breakdown["detect_query_source_ms"] = (time.perf_counter() - _t) * 1000.0
 
-        # Strong generic indicators (legal/process questions that should skip property data entirely)
+        # Strong generic indicators (legal/process questions that will never be in property PDFs)
         is_strong_generic = any(kw in query.lower() for kw in STRONG_GENERIC_KEYWORDS)
 
-        # Trend queries (price/market trends): use property path so we fetch property PDF; don't go generic-first
-        _trend_keywords = (
-            'price trend', 'price trends', 'market trend', 'market trends',
-            'trends for this area', 'price trends for', 'market trends for',
-            'trends in this area', 'trends in the area', 'trend in',
-        )
-        is_trend_query = any(kw in query.lower() for kw in _trend_keywords)
-
         logger.debug(
-            "🔍 Query detection: query_source_detected=%s, is_strong_generic=%s, listing_id=%s, is_trend_query=%s",
+            "🔍 Query detection: query_source_detected=%s, is_strong_generic=%s, listing_id=%s",
             query_source_detected,
             is_strong_generic,
             listing_id,
-            is_trend_query,
         )
 
-        # 3️⃣ CASCADING FALLBACK LOGIC
-        # Priority 1: If query is detected as generic (legal/process), go to generic knowledge first
-        # Exception: trend queries with listing_id use property path so we fetch property PDF
-        if (is_strong_generic or query_source_detected == 'generic') and not (listing_id and is_trend_query):
+        # 3️⃣ ROUTING LOGIC
+        #
+        # Go to generic-first ONLY when:
+        #   a) query is about real-estate law/process (is_strong_generic) — these are never in
+        #      property PDFs so property search would just waste a retrieval round-trip, OR
+        #   b) classified as generic AND there is no listing_id — nothing property-specific
+        #      to search anyway.
+        #
+        # In ALL other cases (including when LLM says "generic" but listing_id is present),
+        # go to the property-first path.  The property cascade (JSON → PDF → generic KB →
+        # escalate) uses cosine-similarity thresholds to decide relevance semantically, so
+        # keyword-based overrides are no longer needed.
+        if is_strong_generic or (query_source_detected == 'generic' and not listing_id):
             early_return, context, data_sources, location_context, query_source = (
                 await self._try_generic_knowledge_first(
                     query=query,
@@ -555,7 +569,104 @@ class ResponseGenerator:
                 context = "\n\n".join(context_parts)
                 query_source = 'property'
                 property_sufficient = len(data_sources) > 0
-                
+
+                # ── KEYWORD BOOST ──────────────────────────────────────────
+                # If the query mentions a specific address / proper noun (e.g.
+                # "Fingal Court", "fingal court"), cosine-similarity ranking may
+                # not surface the exact chunk at the top.  Detect street-name
+                # patterns (case-insensitive) and prepend directly-matching
+                # chunks so the LLM sees them first.
+                if listing_id and property_sufficient:
+                    _STREET_SFXS = (
+                        r'(?:court|drive|street|road|avenue|way|boulevard|'
+                        r'blvd|lane|place|terrace|close|circuit|crescent|'
+                        r'grove|rise|park|parade|highway|run|vale|mews|'
+                        r'ct|rd|ave)'
+                    )
+                    # Capture 1-3 words immediately before a street suffix
+                    _raw = re.findall(
+                        rf'\b([a-zA-Z]+(?:\s+[a-zA-Z]+)?)\s+{_STREET_SFXS}\b',
+                        query,
+                        re.IGNORECASE,
+                    )
+                    # Reconstruct full phrase (name + suffix)
+                    _full = re.findall(
+                        rf'\b([a-zA-Z]+(?:\s+[a-zA-Z]+)?\s+{_STREET_SFXS})\b',
+                        query,
+                        re.IGNORECASE,
+                    )
+                    # Strip leading prepositions (e.g. "in fingal court" → "fingal court")
+                    _PREP = {
+                        'in', 'at', 'on', 'from', 'near', 'around', 'off',
+                        'along', 'the', 'a', 'an', 'to', 'for', 'of', 'by',
+                        'with', 'about', 'into', 'there', 'this', 'that',
+                        'did', 'does', 'do', 'was', 'is', 'are', 'were',
+                        'has', 'have', 'had', 'what', 'which', 'how',
+                    }
+                    addr_terms = []
+                    for phrase in _full:
+                        words = phrase.lower().split()
+                        while words and words[0] in _PREP:
+                            words = words[1:]
+                        cleaned = ' '.join(words)
+                        if cleaned and len(cleaned) > 4:
+                            addr_terms.append(cleaned)
+
+                    # Also extract capitalized multi-word proper nouns (e.g. "Casuarina Drive")
+                    _COMMON = {
+                        'The','This','These','Those','That','What','When',
+                        'Where','Why','How','I','We','They','He','She','It',
+                        'Is','Are','Was','Were','Did','Does','Can','Could',
+                        'Would','Should','Please','For','In','At','On',
+                        'From','With','And','Or','But','If','As','By','To',
+                        'A','An','Do','Not','No','My','Your','Our','Their',
+                        'Has','Have','Had','Will','Get',
+                    }
+                    cap_terms = re.findall(
+                        r'\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)\b',
+                        query,
+                    )
+                    for t in cap_terms:
+                        if not all(w in _COMMON for w in t.split()):
+                            addr_terms.append(t.lower())
+
+                    addr_terms = list(dict.fromkeys(addr_terms))  # deduplicate, preserve order
+
+                    if addr_terms:
+                        logger.info(
+                            "🔍 KEYWORD BOOST: found address terms %s — running ILIKE search",
+                            addr_terms,
+                        )
+                        kw_ctx, kw_sources = self.augmenter.keyword_search_chunks(
+                            listing_id=listing_id,
+                            keywords=addr_terms,
+                        )
+                        if kw_ctx:
+                            boost_terms_str = ", ".join(addr_terms)
+                            context = (
+                                f"🚨🚨🚨 CRITICAL — NEW INFORMATION FOUND FOR: {boost_terms_str.upper()} 🚨🚨🚨\n"
+                                f"The following property data was retrieved specifically for '{boost_terms_str}'.\n"
+                                f"REGARDLESS of any previous conversation where you said you had no information,\n"
+                                f"you MUST use the data below to answer the current question.\n"
+                                f"DO NOT say 'I don't have information' — the answer IS in the data below.\n\n"
+                                + kw_ctx
+                                + "\n\n=== FULL LISTING CONTEXT ===\n"
+                                + context
+                            )
+                            # Deduplicate: remove kw_sources content already in data_sources
+                            existing_previews = {ds.content_preview for ds in data_sources}
+                            new_sources = [
+                                s for s in kw_sources
+                                if s.content_preview not in existing_previews
+                            ]
+                            data_sources = new_sources + data_sources
+                            logger.info(
+                                "✅ KEYWORD BOOST: prepended %d chunk(s) for terms %s",
+                                len(new_sources),
+                                addr_terms,
+                            )
+                # ── END KEYWORD BOOST ──────────────────────────────────────
+
                 if property_sufficient:
                     logger.info("✅ Combined context: JSON + PDF = %d total chunks", len(data_sources))
                 else:
@@ -683,23 +794,8 @@ class ResponseGenerator:
                 location_context = property_location_context
                 query_source = 'property'
 
-        # Trend queries (price trends, market trends): ensure we fetch property PDF chunks even when we already have JSON context.
-        # JSON often has only asking price; trend content usually lives in property_document PDFs.
-        if listing_id and is_trend_query:
-            try:
-                pdf_ctx, pdf_sources, _ = await self.augmenter.augment_query_pdf_chunks(
-                    query=query, listing_id=listing_id, n_results=8
-                )
-                if pdf_ctx and pdf_ctx.strip() and pdf_sources:
-                    if context and data_sources:
-                        context = context + "\n\n" + pdf_ctx
-                        data_sources = list(data_sources) + list(pdf_sources)
-                    else:
-                        context = pdf_ctx
-                        data_sources = pdf_sources
-                    logger.info("📈 Trend query: merged property PDF context for price/market trends")
-            except Exception as e:
-                logger.debug("Trend query PDF fetch failed: %s", e)
+        # NOTE: PDF chunks are always retrieved in parallel with JSON (asyncio.gather above),
+        # so no additional PDF supplement is needed here.
 
         # 4️⃣ Final check - if we still don't have context, provide fallback
         # Last resort when we have listing_id: try location (for amenity links) and property PDF chunks (no keyword lists)
@@ -742,12 +838,6 @@ class ResponseGenerator:
                 answer = (
                     "This is an automated email. We don't have enough information to answer this enquiry "
                     "right now, but we will get back to you shortly."
-                )
-            elif is_trend_query:
-                answer = (
-                    "I don't have price or market trend data for this area in the listing documents. "
-                    "For a detailed market report, please contact the agent or Unreserved. "
-                    "I can help with this property's asking price, features, inspections, and location."
                 )
             else:
                 answer = (
@@ -953,8 +1043,29 @@ class ResponseGenerator:
 
         # Only add amenity links when the query is about amenities (schools, hospitals, bars, etc.),
         # not for price trends, inspections, or other non-amenity questions.
+        # Step 1: fast keyword-based check (no API call)
+        llm_amenity_terms: List[str] = []   # terms identified by LLM fallback (if used)
         if latitude is not None and longitude is not None and is_amenity_query(query):
             has_amenity_links_flag = True
+        elif latitude is not None and longitude is not None and context:
+            # Step 2: LLM fallback — only when keywords didn't match.
+            # Only generates a link if the LLM confirms it's an amenity AND the term
+            # actually appears in the retrieved property context (verified by regex).
+            logger.info("🗺️  Keyword check missed — trying LLM amenity classifier fallback")
+            llm_result = await self._classify_amenity_with_llm(query, context)
+            if llm_result["is_amenity"] and llm_result["found_in_context"]:
+                has_amenity_links_flag = True
+                llm_amenity_terms = llm_result["amenity_terms"]
+                logger.info(
+                    "🗺️  LLM fallback matched amenity terms: %s (found in context)",
+                    llm_amenity_terms,
+                )
+            else:
+                logger.debug(
+                    "🗺️  LLM fallback: is_amenity=%s found_in_context=%s — no link generated",
+                    llm_result.get("is_amenity"),
+                    llm_result.get("found_in_context"),
+                )
 
         # Generate amenity links only when the query is amenity-related
         pre_generated_amenity_links = []
@@ -964,16 +1075,27 @@ class ResponseGenerator:
                 latitude,
                 longitude,
             )
-            amenity_links_result = generate_context_aware_links(
-                query=query,
-                latitude=latitude,
-                longitude=longitude,
-                include_common=True
-            )
-            relevant = amenity_links_result.get('relevant_links', [])
-            suggested = amenity_links_result.get('suggested_links', [])
-            # Use relevant links if available, otherwise use suggested links
-            pre_generated_amenity_links = relevant if relevant else suggested
+            if llm_amenity_terms:
+                # LLM fallback path: build targeted links for exactly the terms the LLM found
+                for term in llm_amenity_terms:
+                    link = generate_custom_search_link(term, latitude, longitude)
+                    pre_generated_amenity_links.append(link)
+                logger.info(
+                    "   → LLM fallback generated %d targeted link(s): %s",
+                    len(pre_generated_amenity_links),
+                    llm_amenity_terms,
+                )
+            else:
+                # Keyword match path: use context-aware generation (relevant → common fallback)
+                amenity_links_result = generate_context_aware_links(
+                    query=query,
+                    latitude=latitude,
+                    longitude=longitude,
+                    include_common=True,
+                )
+                relevant = amenity_links_result.get('relevant_links', [])
+                suggested = amenity_links_result.get('suggested_links', [])
+                pre_generated_amenity_links = relevant if relevant else suggested
             logger.debug(
                 "   → Pre-generated %d links for prompt",
                 len(pre_generated_amenity_links),
@@ -1101,7 +1223,6 @@ class ResponseGenerator:
             # 🚨 RESPONSE LAYER ENFORCEMENT: Check for price disclosure when displayPrice = false
             if listing_id and enquiry_type == "price" and not display_price:
                 # Check if answer contains price information (dollar signs, numbers with currency symbols, etc.)
-                import re
                 price_patterns = [
                     r'\$\s*\d+[,\d]*',  # $500,000 or $500000
                     r'\d+[,\d]*\s*dollars?',  # 500,000 dollars
@@ -1340,9 +1461,10 @@ class ResponseGenerator:
     async def _get_listing_inspection_context(self, listing_id: str) -> str:
         """
         Fetch inspection slots for a listing from listing_inspections and format for LLM context.
-        Returns empty string if none found or on error.
+        Filters out past/cancelled slots. Returns empty string if none found or on error.
         """
         try:
+            from datetime import datetime, timezone, timedelta
             from app.db.postgres.repositories.listing_repository import ListingRepository
             from app.db.connection import get_session_maker
             session_maker = get_session_maker()
@@ -1351,16 +1473,51 @@ class ResponseGenerator:
                 inspections = await repo._fetch_inspections(listing_id)
             if not inspections:
                 return ""
-            lines = ["Inspection slots for this listing (from listing_inspections):"]
-            for i, insp in enumerate(inspections, 1):
+
+            # Display times in AEST (UTC+10). Melbourne is on AEDT in summer (UTC+11)
+            # but UTC+10 is used as a safe conservative display offset.
+            AEST = timezone(timedelta(hours=10))
+            now_utc = datetime.now(timezone.utc)
+
+            upcoming = []
+            for insp in inspections:
                 cancelled = insp.get("isCancelled") if isinstance(insp.get("isCancelled"), bool) else False
-                date = insp.get("inspectionDate") or ""
-                start = insp.get("inspectionStartTime") or ""
-                end = insp.get("inspectionEndTime") or ""
                 if cancelled:
-                    lines.append(f"  {i}. {date} {start}-{end} (CANCELLED)")
+                    continue
+                start_dt = insp.get("inspectionStartTime")
+                # Skip slots that are already in the past
+                if start_dt and hasattr(start_dt, "astimezone"):
+                    if start_dt < now_utc:
+                        continue
+                upcoming.append(insp)
+
+            if not upcoming:
+                return "There are currently no upcoming inspection slots scheduled for this property."
+
+            lines = [
+                f"This property has {len(upcoming)} upcoming inspection slot(s), sorted nearest-first.",
+                "IMPORTANT: List ALL of the following inspection slots in your response.",
+                "The FIRST slot in the list is the NEXT/SOONEST upcoming inspection.\n",
+            ]
+            for i, insp in enumerate(upcoming, 1):
+                insp_type = (insp.get("inspectionType") or "open").replace("_", " ").title()
+                start_dt = insp.get("inspectionStartTime")
+                end_dt = insp.get("inspectionEndTime")
+
+                if start_dt and hasattr(start_dt, "astimezone"):
+                    start_local = start_dt.astimezone(AEST)
+                    end_local = end_dt.astimezone(AEST) if end_dt and hasattr(end_dt, "astimezone") else None
+                    date_str = start_local.strftime("%-d %B %Y")
+                    start_str = start_local.strftime("%-I:%M %p")
+                    end_str = end_local.strftime("%-I:%M %p") if end_local else ""
+                    time_range = f"{start_str} – {end_str} AEST" if end_str else start_str
                 else:
-                    lines.append(f"  {i}. {date} {start}-{end}")
+                    date_str = str(insp.get("inspectionDate") or "")
+                    time_range = f"{start_dt} – {end_dt}"
+
+                next_label = " ← NEXT/SOONEST" if i == 1 else ""
+                lines.append(f"  {i}. {insp_type} Inspection — {date_str}, {time_range}{next_label}")
+
             return "\n".join(lines)
         except Exception as e:
             logger.warning("Failed to fetch inspection slots for listing %s: %s", listing_id, e)
@@ -1601,3 +1758,87 @@ class ResponseGenerator:
             "to answer this fully.\n\n"
             "Please contact the vendor or listing agent for accurate details."
         )
+
+    async def _classify_amenity_with_llm(
+        self,
+        query: str,
+        context: str,
+    ) -> Dict[str, Any]:
+        """
+        LLM fallback for amenity query classification when keyword matching fails.
+
+        Returns a dict with:
+          - is_amenity (bool): True if the query is asking about a nearby place/service
+          - amenity_terms (List[str]): 1-3 short search terms suitable for Google Maps
+          - found_in_context (bool): True if any amenity term appears in the property context
+
+        Only fires when the fast keyword-based check already returned False, so this
+        is purposely lightweight: low max_tokens, deterministic (temperature=0), JSON only.
+        """
+        import json as _json
+
+        system_msg = (
+            "You are a strict classifier. Decide whether a real estate buyer's question "
+            "is asking about a **nearby amenity** — a physical place or service they can "
+            "visit in the neighbourhood (e.g. school, gym, cafe, park, hospital, train station).\n\n"
+            "Rules:\n"
+            "- Classify as amenity ONLY if the user wants to find a nearby place to visit.\n"
+            "- Do NOT classify property features that are part of the property itself "
+            "(e.g. parking space, built-in pool, garden, garage) as amenities.\n"
+            "- Do NOT classify specs, dimensions, prices, bedrooms, legal/regulatory questions.\n"
+            "- amenity_terms must be 1–3 short search words suitable for a Google Maps search "
+            "(e.g. ['gym', 'fitness centre'] or ['primary school']). Return [] if not an amenity.\n\n"
+            "Respond with valid JSON only, no markdown:\n"
+            '{"is_amenity": true/false, "amenity_terms": ["term1", "term2"]}'
+        )
+
+        user_msg = (
+            f'Buyer question: "{query}"\n\n'
+            f"Property context excerpt (first 600 chars):\n{context[:600]}"
+        )
+
+        try:
+            response = create_chat_completion(
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                model=self.model_config["model"],
+                temperature=0,
+                max_tokens=80,
+            )
+            raw = (response.choices[0].message.content or "").strip()
+            # Strip markdown code fences if present
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.DOTALL).strip()
+            result = _json.loads(raw)
+        except Exception as e:
+            logger.debug("_classify_amenity_with_llm failed: %s", e)
+            return {"is_amenity": False, "amenity_terms": [], "found_in_context": False}
+
+        is_amenity = bool(result.get("is_amenity", False))
+        amenity_terms: List[str] = [
+            t.strip().lower()
+            for t in result.get("amenity_terms", [])
+            if isinstance(t, str) and t.strip()
+        ]
+
+        # Verify at least one term is mentioned in the property context so we don't
+        # generate Maps links for amenities the property data never references.
+        context_lower = context.lower()
+        found_in_context = any(
+            re.search(r"\b" + re.escape(term) + r"\b", context_lower)
+            for term in amenity_terms
+        )
+
+        logger.info(
+            "🗺️  LLM amenity classifier → is_amenity=%s, terms=%s, found_in_context=%s",
+            is_amenity,
+            amenity_terms,
+            found_in_context,
+        )
+
+        return {
+            "is_amenity": is_amenity,
+            "amenity_terms": amenity_terms,
+            "found_in_context": found_in_context,
+        }

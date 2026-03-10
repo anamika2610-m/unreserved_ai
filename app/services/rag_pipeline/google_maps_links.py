@@ -3,7 +3,13 @@ Generate Google Maps search links for nearby amenities.
 No API key required - just deep links to Google Maps.
 """
 import re
+from functools import lru_cache
 from typing import List, Dict, Any, Optional, Tuple
+
+
+def _matches_word(term: str, text: str) -> bool:
+    """Return True if *term* appears as a whole word in *text* (case-insensitive)."""
+    return bool(re.search(r'\b' + re.escape(term) + r'\b', text))
 
 # Constants
 DEFAULT_ZOOM_LEVEL = 15
@@ -306,21 +312,15 @@ def is_amenity_query(query: str) -> bool:
     if any(term in query_lower for term in regulatory_terms):
         return False
     
-    # Check for location and amenity context
-    has_location_context = any(indicator in query_lower for indicator in LOCATION_INDICATORS)
-    has_amenity_context = any(indicator in query_lower for indicator in AMENITY_INDICATORS)
+    # Check for location and amenity context using whole-word matching to avoid
+    # false positives like 'spa' matching 'space', 'bar' matching 'barber', etc.
+    has_location_context = any(_matches_word(indicator, query_lower) for indicator in LOCATION_INDICATORS)
+    has_amenity_context = any(_matches_word(indicator, query_lower) for indicator in AMENITY_INDICATORS)
     
-    # Primary check: Must have both location and amenity indicators
-    if has_location_context and has_amenity_context:
-        return True
-    
-    # Fallback: If query has amenity but no explicit location word,
-    # still treat as amenity query if it's a question or command about places
-    if has_amenity_context:
-        if any(indicator in query_lower for indicator in QUESTION_INDICATORS):
-            return True
-    
-    return False
+    # Require BOTH an explicit location indicator AND an amenity indicator.
+    # Without a location word ("nearby", "near", "find me", "where", "any", etc.)
+    # the user is not asking to locate a place — so no Maps link is generated.
+    return has_location_context and has_amenity_context
 
 
 def is_invalid_amenity_query(query: str) -> bool:
@@ -515,7 +515,7 @@ def detect_amenity_query(query: str) -> List[str]:
     
     for amenity_type, config in AMENITY_TYPES.items():
         keywords = config.get("keywords", [])
-        if any(keyword in query_lower for keyword in keywords):
+        if any(_matches_word(keyword, query_lower) for keyword in keywords):
             matched_amenities.append(amenity_type)
     
     return matched_amenities
@@ -533,7 +533,7 @@ def _find_matching_amenity_type(search_term: str) -> Tuple[str, str]:
     """
     search_lower = search_term.lower()
     for atype, config in AMENITY_TYPES.items():
-        if any(keyword in search_lower for keyword in config.get("keywords", [])):
+        if any(_matches_word(keyword, search_lower) for keyword in config.get("keywords", [])):
             return config["icon"], atype
     return DEFAULT_LOCATION_ICON, "custom"
 

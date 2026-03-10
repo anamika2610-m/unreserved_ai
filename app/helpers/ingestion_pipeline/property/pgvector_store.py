@@ -481,8 +481,12 @@ class PgVectorStore:
         logger.info(f"📋 [SYNC] DB has {len(new_doc_ids)} docs: {new_doc_ids}")
         logger.info(f"📋 [SYNC] Vector store has {len(existing_doc_ids)} docs")
         
-        # Step 3: Find orphaned docs (in vector store but NOT in DB)
-        orphans = existing_doc_ids - new_doc_ids
+        # Step 3: Find orphaned docs (in vector store but NOT in DB).
+        # Use db_doc_info.keys() (all doc_ids from property_media) rather than
+        # new_doc_ids (only docs that successfully extracted this run). This prevents
+        # transient extraction failures from incorrectly deleting existing chunks.
+        db_doc_ids = set(db_doc_info.keys()) if db_doc_info else new_doc_ids
+        orphans = existing_doc_ids - db_doc_ids
         deleted_count = 0
         skipped_count = 0
         
